@@ -8,6 +8,8 @@ import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 from torch import nn
 from torch.amp.autocast_mode import autocast
+from logger import log_info
+import numpy as np
 
 
 def batch_dice_loss(inputs: torch.Tensor, targets: torch.Tensor):
@@ -95,6 +97,13 @@ class HungarianMatcher(nn.Module):
             # but approximate it in 1 - proba[target class].
             # The 1 is a constant that doesn't change the matching, it can be ommitted.
             cost_class = -out_prob[:, tgt_ids]
+            
+            # 添加分类成本日志
+            if b == 0:  # 只记录第一个batch的信息以避免过多日志
+                log_info(f"[Hungarian Matcher] Batch {b}: queries={num_queries}, targets={len(tgt_ids)}")
+                log_info(f"[Hungarian Matcher] Target IDs: {tgt_ids.tolist()[:10]}...")  # 只显示前10个
+                log_info(f"[Hungarian Matcher] Pred probs shape: {out_prob.shape}, max prob: {out_prob.max():.4f}")
+                log_info(f"[Hungarian Matcher] Class cost range: [{cost_class.min():.4f}, {cost_class.max():.4f}]")
 
             out_mask = outputs["pred_masks"][b]  # [num_queries, H_pred, W_pred]
             # gt masks are already padded when preparing target
@@ -117,8 +126,30 @@ class HungarianMatcher(nn.Module):
                 + self.cost_dice * cost_dice
             )
             C = C.reshape(num_queries, -1).cpu()
-
-            indices.append(linear_sum_assignment(C))
+            
+            # 添加成本矩阵日志
+            if b == 0:  # 只记录第一个batch的信息
+                log_info(f"[Hungarian Matcher] Mask cost range: [{cost_mask.min():.4f}, {cost_mask.max():.4f}]")
+                log_info(f"[Hungarian Matcher] Dice cost range: [{cost_dice.min():.4f}, {cost_dice.max():.4f}]")
+                log_info(f"[Hungarian Matcher] Total cost matrix shape: {C.shape}")
+                log_info(f"[Hungarian Matcher] Total cost range: [{C.min():.4f}, {C.max():.4f}]")
+                
+                # 记录成本权重
+                log_info(f"[Hungarian Matcher] Cost weights: class={self.cost_class}, mask={self.cost_mask}, dice={self.cost_dice}")
+            
+            # 执行匈牙利算法
+            row_indices, col_indices = linear_sum_assignment(C)
+            
+            if b == 0:  # 记录匹配结果
+                log_info(f"[Hungarian Matcher] Matched {len(row_indices)} pairs")
+                log_info(f"[Hungarian Matcher] Matched queries: {row_indices[:10].tolist()}...")  # 前10个
+                log_info(f"[Hungarian Matcher] Matched targets: {col_indices[:10].tolist()}...")  # 前10个
+                
+                # 计算匹配的平均成本
+                matched_costs = C[row_indices, col_indices]
+                log_info(f"[Hungarian Matcher] Matched costs: mean={matched_costs.mean():.4f}, std={matched_costs.std():.4f}")
+            
+            indices.append((row_indices, col_indices))
 
         return [
             (torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64))

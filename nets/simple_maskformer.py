@@ -13,10 +13,10 @@ from logger import log_info
 from typing import List, Optional
 
 
-class EDLMaskFormer(nn.Module):
+class SimpleMaskFormer(nn.Module):
     """
-    Complete EDL MaskFormer with integrated SMPUnetEncoder and CustomUnetDecoder.
-    This class replaces the part_factory pattern with direct instantiation.
+    基础MaskFormer，基于EDLMaskFormer但移除EDL组件，专注于基础分割功能。
+    支持强制匹配和匈牙利匹配两种模式。
     """
     def __init__(
             self,
@@ -32,7 +32,6 @@ class EDLMaskFormer(nn.Module):
             backbone_use_batchnorm: bool = True,
             backbone_upsample_mode: str = 'interp',
             # Mask features configuration
-            consensus_uncertainty_threshold: float = 0.5,
             mask_dim: int = 64,
             mask_pixel_idxs: Optional[List[int]] = None,
             # Predictor configuration
@@ -46,13 +45,16 @@ class EDLMaskFormer(nn.Module):
             decoder_mask_threshold: float = 0.5,
             decoder_mask_embed_type: str = 'sum_mask',
             decoder_cls_target_type: str = 'single',
+            force_matching: bool = False,  # 新增：强制匹配模式
+            expert_classification: bool = False,  # 新增：专家分类模式开关
             **kwargs
     ):
         super().__init__()
 
         self.num_classes = num_classes
-        self.consensus_uncertainty_threshold = consensus_uncertainty_threshold
         self.decoder_cls_target_type = decoder_cls_target_type
+        self.force_matching = force_matching
+        self.expert_classification = expert_classification
 
         if mask_pixel_idxs is None:
             mask_pixel_idxs = [-4, -3, -2]  # Default from config
@@ -94,15 +96,6 @@ class EDLMaskFormer(nn.Module):
         )
         
         # Initialize predictor
-        # 过滤掉不属于MultiExpertsDecoder的参数
-        predictor_kwargs = {}
-        predictor_allowed_params = {
-            'mask_dim', 'mask_pixel_idxs', 'consensus_uncertainty_threshold'
-        }
-        for k, v in kwargs.items():
-            if k in predictor_allowed_params:
-                predictor_kwargs[k] = v
-        
         self.predictor = MultiExpertsDecoderSingle(
             in_channels=predictor_in_channels,
             num_classes=num_classes,
@@ -119,10 +112,11 @@ class EDLMaskFormer(nn.Module):
             mask_threshold=decoder_mask_threshold,
             mask_embed_type=decoder_mask_embed_type,
             cls_target_type=decoder_cls_target_type,
-            **predictor_kwargs
+            force_matching=force_matching,
+            expert_classification=expert_classification
         )
         
-        log_info(f"EDLMaskFormer initialized with:")
+        log_info(f"SimpleMaskFormer initialized with:")
         log_info(f"  Encoder: {backbone_encoder_name} ({backbone_encoder_weights})")
         log_info(f"  Encoder channels: {encoder_channels}")
         log_info(f"  Decoder channels: {backbone_decoder_channels}")
@@ -130,22 +124,21 @@ class EDLMaskFormer(nn.Module):
         log_info(f"  Mask pixel indices: {mask_pixel_idxs}")
         log_info(f"  Num experts: {num_experts}, Num classes: {num_classes}")
         log_info(f"  Classification target type: {decoder_cls_target_type}")
+        log_info(f"  Force matching: {force_matching}")
+        log_info(f"  Expert classification: {expert_classification}")
+        log_info(f"  Final queries count: {self.predictor.num_queries}")
+        log_info(f"  Classification output dimension: {self.predictor.class_embed.out_features if hasattr(self.predictor, 'class_embed') else 'N/A'}")
+        log_info(f"="*80)
 
     def forward(self, input_image):
         """
-        Forward pass through the complete EDL MaskFormer.
-        
-        现在直接返回网络输出logits作为证据，EDL处理移到loss计算中进行。
-        这样做的好处：
-        1. 保持梯度流的完整性
-        2. 在loss中灵活控制EDL参数
-        3. 减少模型前向传播的计算量
+        Forward pass through the complete SimpleMaskFormer.
         
         Args:
             input_image: Input tensor of shape (B, C, H, W)
             
         Returns:
-            predictions: Dictionary containing raw logits (evidence) and EDL config
+            predictions: Dictionary containing model outputs
         """
         # Encoder forward pass
         en_feats = self.pixel_encoder(input_image)
@@ -179,5 +172,3 @@ class EDLMaskFormer(nn.Module):
         predictions['pix_pred_masks'] = pix_pred_mask
         
         return predictions
-
-

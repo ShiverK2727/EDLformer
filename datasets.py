@@ -131,7 +131,39 @@ class BaseRIGADataset(data.Dataset):
         
         return sample
     
+class RIGADatasetSimple(BaseRIGADataset):
+    def __init__(self, config_path=None, is_train=True):
+        super(RIGADatasetSimple, self).__init__(config_path, is_train)
 
+    def __getitem__(self, index):
+        base_sample = super(RIGADatasetSimple, self).__getitem__(index)
+        
+        image = base_sample["image"]          # [3, H, W]
+        masks_disc_cup = base_sample["masks_disc_cup"]  # [N, 3, H, W]
+        n_experts, num_classes, h, w = masks_disc_cup.shape
+        name = base_sample["name"]
+
+        # 2. 分别计算 Disc 和 Cup 的平均投票
+        # masks_disc_cup 的通道1是 disc, 通道2是 cup
+        all_disc_masks = masks_disc_cup[:, 1, :, :]  # [N, H, W]
+        all_cup_masks = masks_disc_cup[:, 2, :, :]   # [N, H, W]
+
+        all_expert_masks = torch.cat([all_disc_masks, all_cup_masks], dim=0)  # [2N, H, W]
+
+        expert_labels = torch.arange(n_experts * 2, dtype=torch.long)  # [2N_experts]
+        mask_labels = [0] * n_experts + [1] * n_experts  # Disc=0, Cup=1
+
+        val_masks = torch.stack([all_disc_masks, all_cup_masks], dim=1).float()  # [N, 2, H, W]
+
+        sample = {
+            "image": image,
+            "expert_masks": all_expert_masks, # [2N, H, W]
+            "expert_labels": expert_labels,   # [2N]
+            "mask_labels": torch.tensor(mask_labels, dtype=torch.long), # [2N], Disc=0, Cup=1
+            "val_masks": val_masks,           # [N, 2, H, W]
+            "name": name
+        }
+        return sample
 
 # =================================================================================
 #  数据增强 Transform 类的定义 (已重构为 Tensor-first)

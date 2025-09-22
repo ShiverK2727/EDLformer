@@ -12,10 +12,12 @@ import json
 import argparse
 
 # 从项目中导入必要的模块
-from edl_datasets import RIGADataset as EDLRIGADataset
+from datasets import RIGADatasetSimple as RIGADataset
 from nets.edl_maskformer import EDLMaskFormer
+from nets.simple_maskformer import SimpleMaskFormer
 # --- [修复] 导入正确的损失函数模块 ---
 from scheduler.edl_single_loss import EDLSingleLoss
+from scheduler.simple_maskformer_loss import SimpleMaskformerLoss
 from logger import log_info, log_error
 
 # ==============================================================================
@@ -43,6 +45,39 @@ def load_config(yaml_path):
 # ==============================================================================
 # 组件构建器 (Builders / Factories)
 # ==============================================================================
+
+def build_simple_maskformer_components(config):
+    """根据配置构建并返回基础MaskFormer模型和损失函数。"""
+    model_config = config['model']
+    loss_config = config.get('loss', {})
+    
+    # 记录模型配置参数
+    log_info("="*80, print_message=True)
+    log_info("构建SimpleMaskFormer模型...", print_message=True)
+    log_info("模型配置参数:", print_message=True)
+    import json
+    for key, value in model_config.items():
+        log_info(f"  {key}: {value}", print_message=True)
+    log_info("="*80, print_message=True)
+    
+    # 构建SimpleMaskFormer模型
+    model = SimpleMaskFormer(**model_config)
+    log_info("SimpleMaskFormer 模型构建完成。", print_message=True)
+
+    # 记录损失函数配置参数
+    log_info("="*80, print_message=True)
+    log_info("构建SimpleMaskformerLoss损失函数...", print_message=True)
+    log_info("损失函数配置参数:", print_message=True)
+    for key, value in loss_config.items():
+        log_info(f"  {key}: {value}", print_message=True)
+    log_info("="*80, print_message=True)
+
+    # 构建SimpleMaskformerLoss损失函数
+    loss_params = {k: v for k, v in loss_config.items() if k != 'loss_name'}
+    loss_fn = SimpleMaskformerLoss(**loss_params)
+    log_info("SimpleMaskformerLoss 损失函数构建完成。", print_message=True)
+    
+    return model.cuda(), loss_fn
 
 def build_edl_components(config):
     """根据配置构建并返回 EDL MaskFormer 模型和损失函数。"""
@@ -162,9 +197,9 @@ def build_dataloaders(config, dataset_type=None):
         dataset_type = config.get('dataset_type', 'RIGA')
     
     if dataset_type == "RIGA":
-        # 假设 EDLRIGADataset 接受 config_path 和 is_train
-        dataset = EDLRIGADataset(config_path=config['dataset_yaml'], is_train=True)
-        val_dataset = EDLRIGADataset(config_path=config['dataset_yaml'], is_train=False)
+        # 假设 RIGADataset 接受 config_path 和 is_train
+        dataset = RIGADataset(config_path=config['dataset_yaml'], is_train=True)
+        val_dataset = RIGADataset(config_path=config['dataset_yaml'], is_train=False)
     else:
         raise ValueError(f"未知的数据集类型: {dataset_type}")
 
