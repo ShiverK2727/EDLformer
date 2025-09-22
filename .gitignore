@@ -1,0 +1,92 @@
+# 数据集目录 - 忽略所有内容但保留目录结构
+data/*
+!data/.gitkeep
+!data/README.md
+
+*.tar
+*.zip
+*.gz
+*.rar
+*.tar.gz
+*.pth
+
+# 调试可视化文件 - 忽略所有内容
+debug_vis/*
+!debug_vis/.gitkeep
+!debug_vis/README.md
+
+# 实验结果目录 - 忽略所有内容
+exp/*
+!exp/.gitkeep
+!exp/README.md
+
+# Python 相关
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.conda/
+
+# IDE 和编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统文件
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# 日志文件
+*.log
+logs/
+
+# 临时文件
+*.tmp
+*.temp
+.cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# 模型文件（如果很大的话）
+*.pth
+*.pkl
+*.h5
+*.ckpt
+
+# 配置文件（如果包含敏感信息）
+config.yaml
+config.json
+.env.local
