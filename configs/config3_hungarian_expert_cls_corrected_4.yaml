@@ -1,0 +1,85 @@
+# 配置3：匈牙利匹配 + 专家分类
+# 动态匹配，预测专家ID
+
+seed: 42
+epochs: 100
+batch_size: 8
+use_amp: true
+max_checkpoints: 3
+dataset_type: 'RIGA'
+save_dir: './exp_hungarian_expert_cls'
+
+# 模型配置
+model:
+  in_channels: 3
+  num_classes: 2  # 语义类别数（disc, cup）- 模型内部会根据模式调整输出维度
+  num_experts: 6  # 6个专家
+  num_extra_queries: 14  # 额外的queries用于匈牙利匹配（建议>=2N）
+  
+  # 匈牙利匹配 + 专家分类模式
+  force_matching: false        # 禁用固定匹配，使用匈牙利匹配
+  expert_classification: true  # 启用专家分类：输出专家ID
+  
+  # Encoder配置
+  backbone_encoder_name: "resnet34"
+  backbone_encoder_weights: "imagenet"
+  
+  # Decoder配置
+  backbone_decoder_channels: [256, 128, 64, 32, 16]
+  backbone_use_batchnorm: true
+  backbone_upsample_mode: 'interp'
+  
+  # Mask features配置
+  mask_dim: 64
+  mask_pixel_idxs: [-4, -3, -2]
+  
+  # Predictor配置
+  decoder_nheads: 8
+  decoder_dim_feedforward: 384
+  decoder_dec_layers: 3
+  decoder_pre_norm: false
+  decoder_num_feature_levels: 3
+  decoder_use_pos_emb: false
+  decoder_non_object: true   # 匈牙利匹配模式下可以有non_object
+  decoder_mask_threshold: 0.5
+  decoder_mask_embed_type: 'sum_mask'
+  decoder_cls_target_type: 'single'
+
+# 损失函数配置
+loss:
+  num_classes: 2              # 语义类别数量（disc, cup）
+  num_experts: 6              # 专家数量
+  force_matching: false       # 禁用固定匹配，使用匈牙利匹配
+  expert_classification: true # 启用专家分类模式
+  
+  # 匈牙利匹配器配置 - 调整权重以适应专家分类
+  matcher_cost_class: 8.0         # 增加分类权重，因为专家分类比语义分类更难
+  matcher_cost_mask: 2.0
+  matcher_cost_dice: 2.0
+  
+  # 损失权重
+  eos_coef: 1
+  cost_weight: [8.0, 2.0, 2.0]  # [cls, bce, dice]
+  non_object: true
+  no_object_weight: null
+  
+  # 深监督配置
+  ds_loss_weights: [1.0, 0.8, 0.6, 0.4]
+  disable_ds: true
+  ds_avg_type: 'v0'
+  cls_type: null
+
+# 优化器配置
+optimizer:
+  type: 'AdamW'
+  weight_decay: 1e-4
+  eps: 1e-8
+  betas: [0.9, 0.999]
+  amsgrad: false
+
+# 学习率调度器配置
+schelduler:
+  use_cosine_scheduler: true
+  base_lr: 1e-3
+  min_lr: 1e-5
+  warmup: 20

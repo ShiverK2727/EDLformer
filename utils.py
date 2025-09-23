@@ -13,11 +13,17 @@ import argparse
 
 # 从项目中导入必要的模块
 from datasets import RIGADatasetSimple as RIGADataset
+from datasets import RIGADatasetSimpleMulti
 from nets.edl_maskformer import EDLMaskFormer
-from nets.simple_maskformer import SimpleMaskFormer
+from nets.simple_maskformer import SimpleMaskFormer, SimpleMaskFormerMulti, SimpleMaskFormerMultiV2
 # --- [修复] 导入正确的损失函数模块 ---
 from scheduler.edl_single_loss import EDLSingleLoss
 from scheduler.simple_maskformer_loss import SimpleMaskformerLoss
+from scheduler.simple_maskformer_multi_loss import (
+    SimpleMaskFormerMultiLoss, 
+    SimpleMaskFormerMultiLossFixed, 
+    SimpleMaskFormerMultiLossHungarian
+)
 from logger import log_info, log_error
 
 # ==============================================================================
@@ -76,6 +82,59 @@ def build_simple_maskformer_components(config):
     loss_params = {k: v for k, v in loss_config.items() if k != 'loss_name'}
     loss_fn = SimpleMaskformerLoss(**loss_params)
     log_info("SimpleMaskformerLoss 损失函数构建完成。", print_message=True)
+    
+    return model.cuda(), loss_fn
+
+def build_simple_maskformer_multi_components(config):
+    """根据配置构建并返回Multi版本MaskFormer模型和损失函数。"""
+    model_config = config['model']
+    loss_config = config.get('loss', {})
+    
+    # 记录模型配置参数
+    log_info("="*80, print_message=True)
+    log_info("构建SimpleMaskFormerMulti模型...", print_message=True)
+    log_info("模型配置参数:", print_message=True)
+    import json
+    for key, value in model_config.items():
+        log_info(f"  {key}: {value}", print_message=True)
+    log_info("="*80, print_message=True)
+    
+    # 根据模型类型选择构建函数
+    model_type = model_config.get('model_type', 'multi')  # 'multi' or 'multi_v2'
+    
+    if model_type == 'multi_v2':
+        model = SimpleMaskFormerMultiV2(**{k: v for k, v in model_config.items() if k != 'model_type'})
+        log_info("SimpleMaskFormerMultiV2 模型构建完成（增强SEBlock版本）。", print_message=True)
+    else:
+        model = SimpleMaskFormerMulti(**{k: v for k, v in model_config.items() if k != 'model_type'})
+        log_info("SimpleMaskFormerMulti 模型构建完成。", print_message=True)
+
+    # 记录损失函数配置参数
+    log_info("="*80, print_message=True)
+    log_info("构建SimpleMaskFormerMultiLoss损失函数...", print_message=True)
+    log_info("损失函数配置参数:", print_message=True)
+    for key, value in loss_config.items():
+        log_info(f"  {key}: {value}", print_message=True)
+    log_info("="*80, print_message=True)
+
+    # 构建Multi版本损失函数
+    loss_type = loss_config.get('loss_type', 'auto')  # 'fixed', 'hungarian', 'auto'
+    loss_params = {k: v for k, v in loss_config.items() if k not in ['loss_type', 'loss_name']}
+    
+    if loss_type == 'fixed':
+        loss_params['force_matching'] = True
+        loss_fn = SimpleMaskFormerMultiLossFixed(**loss_params)
+        log_info("SimpleMaskFormerMultiLossFixed 损失函数构建完成（固定匹配）。", print_message=True)
+    elif loss_type == 'hungarian':
+        loss_params['force_matching'] = False  
+        loss_fn = SimpleMaskFormerMultiLossHungarian(**loss_params)
+        log_info("SimpleMaskFormerMultiLossHungarian 损失函数构建完成（匈牙利匹配）。", print_message=True)
+    else:
+        # 自动模式：使用配置中的force_matching值（已在loss_params中）
+        force_matching = loss_config.get('force_matching', True)
+        loss_fn = SimpleMaskFormerMultiLoss(**loss_params)
+        match_type = "固定匹配" if force_matching else "匈牙利匹配"
+        log_info(f"SimpleMaskFormerMultiLoss 损失函数构建完成（自动模式：{match_type}）。", print_message=True)
     
     return model.cuda(), loss_fn
 
@@ -200,6 +259,24 @@ def build_dataloaders(config, dataset_type=None):
         # 假设 RIGADataset 接受 config_path 和 is_train
         dataset = RIGADataset(config_path=config['dataset_yaml'], is_train=True)
         val_dataset = RIGADataset(config_path=config['dataset_yaml'], is_train=False)
+    else:
+        raise ValueError(f"未知的数据集类型: {dataset_type}")
+
+    dataloader = DataLoader(dataset, batch_size=config['batch_size'], shuffle=True, num_workers=4, pin_memory=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=4, pin_memory=True)
+    
+    return dataloader, val_dataloader
+
+def build_dataloaders_multi(config, dataset_type=None):
+    """构建Multi版本的数据加载器，使用RIGADatasetSimpleMulti。"""
+    if dataset_type is None:
+        dataset_type = config.get('dataset_type', 'RIGA')
+    
+    if dataset_type == "RIGA":
+        # 使用Multi版本的数据集
+        dataset = RIGADatasetSimpleMulti(config_path=config['dataset_yaml'], is_train=True)
+        val_dataset = RIGADatasetSimpleMulti(config_path=config['dataset_yaml'], is_train=False)
+        log_info("使用RIGADatasetSimpleMulti数据集（BN2HW格式）", print_message=True)
     else:
         raise ValueError(f"未知的数据集类型: {dataset_type}")
 

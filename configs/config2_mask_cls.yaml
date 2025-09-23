@@ -1,0 +1,85 @@
+# 配置2：mask类别分类（不区分专家）
+# 直接预测语义类别（disc, cup），不考虑专家区分
+
+seed: 42
+epochs: 100
+batch_size: 8
+use_amp: true
+max_checkpoints: 3
+dataset_type: 'RIGA'
+save_dir: './exp_mask_cls'
+
+# 模型配置
+model:
+  in_channels: 3
+  num_classes: 2  # disc, cup (直接预测语义类别)
+  num_experts: 6  # 数据集有6个专家（但预测时不区分）
+  num_extra_queries: 10         # 增加足够的queries确保匹配12个targets
+  
+  # mask分类模式：不使用专家匹配
+  force_matching: false        # 禁用固定匹配
+  expert_classification: false # 禁用专家分类：直接输出语义类别
+  
+  # Encoder配置
+  backbone_encoder_name: "resnet34"
+  backbone_encoder_weights: "imagenet"
+  
+  # Decoder配置
+  backbone_decoder_channels: [256, 128, 64, 32, 16]
+  backbone_use_batchnorm: true
+  backbone_upsample_mode: 'interp'
+  
+  # Mask features配置
+  mask_dim: 64
+  mask_pixel_idxs: [-4, -3, -2]
+  
+  # Predictor配置
+  decoder_nheads: 8
+  decoder_dim_feedforward: 384
+  decoder_dec_layers: 3
+  decoder_pre_norm: false
+  decoder_num_feature_levels: 3
+  decoder_use_pos_emb: false
+  decoder_non_object: true   # 可以有background类别
+  decoder_mask_threshold: 0.5
+  decoder_mask_embed_type: 'sum_mask'
+  decoder_cls_target_type: 'single'
+
+# 损失函数配置
+loss:
+  num_classes: 2              # mask类别数量
+  num_experts: 6              # 专家数量（仅用于数据处理）
+  force_matching: false       # 禁用固定匹配模式
+  expert_classification: false # 禁用专家分类（预测语义类别）
+  
+  # 匈牙利匹配器配置（用于语义级别匹配）
+  matcher_cost_class: 2.0
+  matcher_cost_mask: 5.0
+  matcher_cost_dice: 5.0
+  
+  # 损失权重
+  eos_coef: 1
+  cost_weight: [2.0, 5.0, 5.0]  # [cls, bce, dice]
+  non_object: true
+  no_object_weight: null
+  
+  # 深监督配置
+  ds_loss_weights: [1.0, 0.8, 0.6, 0.4]
+  disable_ds: false
+  ds_avg_type: 'v0'
+  cls_type: null
+
+# 优化器配置
+optimizer:
+  type: 'AdamW'
+  weight_decay: 1e-4
+  eps: 1e-8
+  betas: [0.9, 0.999]
+  amsgrad: false
+
+# 学习率调度器配置
+schelduler:
+  use_cosine_scheduler: true
+  base_lr: 1e-3
+  min_lr: 1e-5
+  warmup: 5
