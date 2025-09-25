@@ -1,3 +1,2 @@
 from .smp_unet_backbone import SMPUnetEncoder, CustomUnetDecoder
-from .edl_maskformer import EDLMaskFormer
-from .edl_process import process_edlmaskformer_outputs
+from .simple_edl_maskformer import FlexibleEDLMaskFormer

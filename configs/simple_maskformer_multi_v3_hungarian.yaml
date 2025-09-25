@@ -1,0 +1,108 @@
+# EDLformer统一训练配置 - FlexibleEDLMaskFormer
+# 使用统一的training配置节点管理所有训练相关参数
+
+# 数据集配置
+dataset:
+  type: 'RIGA'
+  config_path: './codes/configs/RIGA.yaml'  # 数据集配置文件路径
+
+# 实验输出配置
+experiment:
+  save_dir: './exp/multi_v3_hungarian_edl'
+  max_checkpoints: 3
+  
+# 统一训练配置 - 包含所有训练相关参数
+training:
+  # 基础训练参数
+  seed: 42                        # 随机种子
+  epochs: 100                     # 训练轮数
+  batch_size: 8                   # 批处理大小
+  use_amp: true                   # 是否使用混合精度训练
+  
+  # 核心学习率配置
+  learning_rate: 1e-3             # 基础学习率
+  min_learning_rate: 1e-5         # 最小学习率（用于余弦退火）
+  
+  # 优化器配置
+  optimizer_type: 'AdamW'         # 优化器类型: AdamW, Adam, SGD
+  weight_decay: 1e-4              # 权重衰减
+  betas: [0.9, 0.999]            # AdamW beta参数
+  eps: 1e-8                      # AdamW epsilon参数
+  amsgrad: false                 # 是否使用AMSGrad
+  momentum: 0.9                  # SGD动量（仅SGD使用）
+  
+  # 学习率调度器配置
+  use_cosine_scheduler: true      # 是否使用余弦退火调度器
+  warmup_epochs: 20              # 预热轮数
+
+# 模型配置 - FlexibleEDLMaskFormer统一模型
+model:
+  # 基础配置
+  in_channels: 3
+  num_cls_classes: 12  # 分类头类别总数 (6专家 * 2对象 = 12个专家-对象组合)
+  num_queries: 12      # 查询数量，匹配专家*类别组合数
+  
+  # Encoder配置
+  backbone_encoder_name: "resnet34"
+  backbone_encoder_weights: "imagenet"
+  
+  # Decoder配置 (像素级别)
+  backbone_decoder_channels: [256, 128, 64, 32, 16]
+  backbone_use_batchnorm: true
+  backbone_upsample_mode: 'interp'
+  
+  # 掩码特征配置
+  mask_dim: 64
+  mask_pixel_idxs: [-4, -3, -2]  # 使用解码器最后三层特征
+  
+  # Predictor配置 (Transformer)
+  predictor_nheads: 8
+  predictor_dim_feedforward: 384
+  predictor_dec_layers: 3
+  predictor_pre_norm: false
+  predictor_use_pos_emb: false
+  predictor_non_object: true   # 支持背景类别 (实际分类输出维度为num_cls_classes+1=13)
+  
+  # EDL专用配置
+  predictor_cls_type: 'single'  # 单标签模式(Dirichlet)或多标签模式(Beta)
+  predictor_attn_mask_type: 'uncertainty_ratio'  # 注意力掩码生成策略
+  predictor_mask_threshold: 0.5
+  predictor_uncertainty_threshold: 0.5
+  predictor_uncertainty_focus_ratio: 0.2  # 关注不确定性最高的20%像素
+
+# 损失函数配置 - SimpleEDLMaskformerLossV2
+# 注意：分割部分使用Beta分布处理二元前景-背景mask，每个query处理单独的对象
+loss:
+  
+  # 匈牙利匹配器配置
+  matcher_cost_class: 2.0
+  matcher_cost_dice: 5.0
+  matcher_cost_evidence: 1.0  # EDL证据错配代价
+  matcher_cost_class_type: 'evidence'  # 'ce' 或 'evidence'
+  
+  # 损失类型配置
+  cls_loss_type: 'edl'        # 分类损失类型
+  seg_edl_as_dirichlet: false # 分割是否使用Dirichlet
+  dice_on_logits: false       # DICE是否基于logits
+  
+  # 分支权重
+  branch_weight_cls: 1.0      # 分类分支权重
+  branch_weight_seg: 1.0      # 分割分支权重
+  
+  # 分类损失子权重
+  loss_weight_cls: 1.0        # 分类损失权重
+  loss_weight_kl: 0.1         # KL散度正则化权重
+  
+  # 分割损失子权重
+  loss_weight_dice: 1.0       # DICE损失权重
+  loss_weight_edl_mask: 1.0   # EDL掩码损失权重
+  
+  # 其他配置
+  eos_coef: 0.1               # 背景类别权重
+  non_object: true            # 启用背景类别
+  annealing_steps: 10000      # KL退火步数
+  log_interval: 100           # 日志记录间隔
+  use_direct_matching: false  # 是否跳过匈牙利匹配
+  
+  # 深监督配置
+  ds_loss_weights: [1.0, 0.8, 0.6, 0.4]  # 深监督权重

@@ -12,10 +12,10 @@ from torch.amp.grad_scaler import GradScaler
 # 假设所有必要的模块都位于正确的路径下
 from logger import setup_logger, log_info
 from utils import (
-    set_seed, load_config,
-    build_optimizer, build_scheduler, build_dataloaders,
-    build_simple_maskformer_components, save_checkpoint,
-    apply_args_override, setup_training_args_parser, save_override_record,
+    set_seed, load_config, build_optimizer, build_scheduler, 
+    build_edl_components, process_batch_for_expert_class_combination,
+    save_checkpoint, apply_args_override, setup_training_args_parser, 
+    save_override_record,
 )
 # --- 简化的指标计算 ---
 from metrics import (
@@ -61,31 +61,13 @@ def train_loop(model,
             optimizer.zero_grad(set_to_none=True)
             
             # 基础MaskFormer训练 - 适配2N数据格式
-            images = batch['image'].cuda(non_blocking=True)
-            
-            # 新的数据格式适配 - 来自RIGADatasetSimple
-            target_expert_masks = batch['expert_masks'].cuda(non_blocking=True)    # (B, 2N, H, W) - N个disc + N个cup
-            target_expert_labels = batch['expert_labels'].cuda(non_blocking=True)  # (B, 2N) - 专家ID序列
-            target_mask_labels = batch['mask_labels'].cuda(non_blocking=True)      # (B, 2N) - mask类别标签
+            images = batch['image'].cuda(non_blocking=True) # (B, C, H, W)
+            expert_masks = batch['expert_masks'].cuda(non_blocking=True)  # (B, N, 2, H, W)
+            expert_targets, _ = process_batch_for_expert_class_combination(batch)
 
             with autocast(device_type='cuda', enabled=(scaler is not None)):
-                # 前向传播
                 outputs = model(images)
-                
-                # 准备目标数据格式 - 适配新的损失函数
-                targets = []
-                batch_size = images.shape[0]
-                
-                for b in range(batch_size):
-                    batch_targets = {
-                        'expert_masks': target_expert_masks[b],    # (2N, H, W)
-                        'expert_labels': target_expert_labels[b],  # (2N,)
-                        'mask_labels': target_mask_labels[b]       # (2N,)
-                    }
-                    targets.append(batch_targets)
-                
-                # 计算损失
-                loss_total = loss_fn(outputs, targets)
+                loss_total = loss_fn(outputs, expert_targets)
             
             if scaler is not None:
                 scaler.scale(loss_total).backward()

@@ -164,6 +164,36 @@ class RIGADatasetSimple(BaseRIGADataset):
             "name": name
         }
         return sample
+    
+
+class RIGADatasetSimpleV2(BaseRIGADataset):
+    def __init__(self, config_path=None, is_train=True):
+        super(RIGADatasetSimpleV2, self).__init__(config_path, is_train)
+
+    def __getitem__(self, index):
+        base_sample = super(RIGADatasetSimpleV2, self).__getitem__(index)
+        
+        image = base_sample["image"]          # [3, H, W]
+        masks_disc_cup = base_sample["masks_disc_cup"]  # [N, 3, H, W]
+        n_experts, num_classes, h, w = masks_disc_cup.shape
+        name = base_sample["name"]
+
+        # [N, 2, H, W]
+        all_expert_masks = masks_disc_cup[:, 1:3, :, :].float()  # 只保留 Disc 和 Cup 通道
+        # [2, H, W]
+        consensus_mask = torch.min(all_expert_masks, dim=0).values # [2, H, W]
+
+        expert_labels = torch.arange(n_experts, dtype=torch.long)  # [N_experts]
+
+        sample = {
+            "image": image,
+            "expert_masks": all_expert_masks, # [N, 2, H, W]
+            "expert_labels": expert_labels,   # [N]
+            "consensus_mask": consensus_mask,  # [2, H, W]
+            "name": name
+        }
+        return sample
+
 
 class RIGADatasetSimpleMulti(BaseRIGADataset):
     def __init__(self, config_path=None, is_train=True):
