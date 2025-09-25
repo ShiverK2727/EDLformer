@@ -113,7 +113,8 @@ class SimpleEDLMaskformerLossV2(nn.Module):
     """
 
     def __init__(self,
-                 num_classes=2,  # 分类分支的分割类别数，用于计算背景类ID（保留以兼容现有逻辑）
+                 num_cls_classes,  # 分类头的类别数（不包含背景类）
+                 # 注意：分割部分固定为二元分割（前景/背景），与 num_cls_classes 无关
                  # Matcher weights
                  matcher_cost_class=1.0,
                  matcher_cost_dice=1.0,
@@ -143,8 +144,9 @@ class SimpleEDLMaskformerLossV2(nn.Module):
                  ):
         super().__init__()
         
-        # num_classes用于定义背景类别ID，对于二元分割（disc/cup）默认为2
-        self.num_classes = num_classes
+        # num_cls_classes: 仅用于分类头，表示真实的分类类别数（不包含背景类）
+        # 分割部分固定为二元分割，与num_cls_classes无关
+        self.num_cls_classes = num_cls_classes
         self.cls_loss_type = cls_loss_type
         self.seg_edl_as_dirichlet = seg_edl_as_dirichlet
         self.dice_on_logits = dice_on_logits
@@ -160,7 +162,8 @@ class SimpleEDLMaskformerLossV2(nn.Module):
             
         self.eos_coef, self.non_object = eos_coef, non_object
         if self.non_object:
-            empty_weight = torch.ones(self.num_classes + 1)
+            # 分类头的总类别数 = 真实类别数 + 1(背景类)
+            empty_weight = torch.ones(self.num_cls_classes + 1)
             empty_weight[-1] = self.eos_coef
             self.register_buffer("empty_weight", empty_weight)
 
@@ -199,29 +202,51 @@ class SimpleEDLMaskformerLossV2(nn.Module):
 
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
         
-        background_class = self.num_classes
-        target_classes = torch.full(
-            src_logits_alpha.shape[:2], background_class, dtype=torch.int64, device=src_logits_alpha.device
-        )
-        target_classes[idx] = target_classes_o
+        if self.use_direct_matching:
+            # 直接匹配模式：每个样本都有固定数量的目标(N*C=12个专家-类别组合)
+            # 不需要背景类，直接计算匹配的查询-目标对的损失
+            if self.cls_loss_type == 'ce':
+                # 对匹配的查询使用交叉熵损失
+                src_logits_matched = src_logits_alpha[idx]  # [num_matches, num_cls_classes]
+                loss_cls = F.cross_entropy(src_logits_matched, target_classes_o)
+                loss_kl = torch.tensor(0.0, device=src_logits_alpha.device)
+            else: # 'edl'
+                evidence = F.softplus(src_logits_alpha)
+                alpha = evidence + 1
+                alpha_matched = alpha[idx]  # [num_matches, num_cls_classes]
+                # 使用num_cls_classes作为类别数（不包含背景类）
+                target_one_hot_matched = F.one_hot(target_classes_o, num_classes=self.num_cls_classes).float()
+                
+                loss_cls = edl_dirichlet_loss(alpha_matched, target_one_hot_matched)
+                annealing_coef = min(1.0, current_step / self.annealing_steps)
+                loss_kl = annealing_coef * kl_divergence_dirichlet(alpha_matched, target_one_hot_matched)
+        else:
+            # 匈牙利匹配模式：需要处理背景类
+            background_class = self.num_cls_classes
+            target_classes = torch.full(
+                src_logits_alpha.shape[:2], background_class, dtype=torch.int64, device=src_logits_alpha.device
+            )
+            target_classes[idx] = target_classes_o
 
-        num_total_classes = self.num_classes + 1
-        
-        if self.cls_loss_type == 'ce':
-            loss_cls = F.cross_entropy(src_logits_alpha.transpose(1, 2), target_classes, self.empty_weight)
-            loss_kl = torch.tensor(0.0, device=src_logits_alpha.device)
-        else: # 'edl'
-            evidence = F.softplus(src_logits_alpha)
-            alpha = evidence + 1
-            alpha_matched = alpha[idx]
-            target_one_hot_matched = F.one_hot(target_classes_o, num_classes=num_total_classes).float()
+            # 分类头的总类别数 = 真实类别数 + 背景类
+            num_total_classes = self.num_cls_classes + (1 if self.non_object else 0)
             
-            loss_cls = edl_dirichlet_loss(alpha_matched, target_one_hot_matched)
-            annealing_coef = min(1.0, current_step / self.annealing_steps)
-            loss_kl = annealing_coef * kl_divergence_dirichlet(alpha_matched, target_one_hot_matched)
+            if self.cls_loss_type == 'ce':
+                loss_cls = F.cross_entropy(src_logits_alpha.transpose(1, 2), target_classes, self.empty_weight if self.non_object else None)
+                loss_kl = torch.tensor(0.0, device=src_logits_alpha.device)
+            else: # 'edl'
+                evidence = F.softplus(src_logits_alpha)
+                alpha = evidence + 1
+                alpha_matched = alpha[idx]
+                target_one_hot_matched = F.one_hot(target_classes_o, num_classes=num_total_classes).float()
+                
+                loss_cls = edl_dirichlet_loss(alpha_matched, target_one_hot_matched)
+                annealing_coef = min(1.0, current_step / self.annealing_steps)
+                loss_kl = annealing_coef * kl_divergence_dirichlet(alpha_matched, target_one_hot_matched)
 
         if should_log:
-            log_info(f"[Loss Labels] Matched {num_matches} queries. "
+            matching_mode = "Direct" if self.use_direct_matching else "Hungarian"
+            log_info(f"[Loss Labels - {matching_mode}] Matched {num_matches} queries. "
                      f"loss_cls: {loss_cls.item():.4f}, loss_kl: {loss_kl.item():.4f}")
 
         return loss_cls, loss_kl
@@ -285,19 +310,31 @@ class SimpleEDLMaskformerLossV2(nn.Module):
 
         # 根据开关选择匹配策略
         if self.use_direct_matching:
+            # 直接匹配：每个样本的前N*C个查询直接与N*C个目标一对一匹配
             indices = []
             for i, t in enumerate(targets):
-                num_targets = len(t["labels"])
-                num_queries = outputs["pred_logits"][0].shape[1]
+                num_targets = len(t["labels"])  # 应该是N*C=12
+                num_queries = outputs["pred_logits"][0].shape[1]  # 模型的查询数量
+                
                 if num_queries < num_targets:
                     raise ValueError(
-                        f"Direct matching requires num_queries ({num_queries}) >= num_targets ({num_targets})."
+                        f"Direct matching requires num_queries ({num_queries}) >= num_targets ({num_targets}). "
+                        f"Sample {i} has {num_targets} targets but model only has {num_queries} queries."
                     )
+                
+                # 直接匹配：前num_targets个查询对应num_targets个目标
                 src_idx = torch.arange(num_targets, device=device)
                 tgt_idx = torch.arange(num_targets, device=device)
                 indices.append((src_idx, tgt_idx))
+                
+                if should_log and i == 0:  # 只在第一个样本时记录
+                    log_info(f"[Direct Matching] Sample {i}: {num_targets} targets matched to first {num_targets} queries")
         else:
+            # 匈牙利匹配：使用匹配器寻找最优分配
             indices = self.matcher(outputs, targets)
+            if should_log:
+                total_matches = sum(len(idx[0]) for idx in indices)
+                log_info(f"[Hungarian Matching] Total matches across batch: {total_matches}")
 
         loss_cls, loss_kl = self.loss_labels(outputs, targets, indices, current_step, should_log)
         loss_dice, loss_edl_mask = self.loss_masks(outputs, targets, indices, should_log)

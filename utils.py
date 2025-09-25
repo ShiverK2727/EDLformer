@@ -78,7 +78,27 @@ def build_edl_components(config):
     log_info("="*80, print_message=True)
     log_info("构建 SimpleEDLMaskformerLossV2 损失函数...", print_message=True)
     loss_params = {k: v for k, v in loss_config.items()}
+    # 确保num_cls_classes参数存在（用于分类头）
+    if 'num_cls_classes' not in loss_params:
+        # 从模型配置获取分类类别数
+        loss_params['num_cls_classes'] = model_config.get('num_cls_classes', 12)
+        log_info(f"自动设置 num_cls_classes = {loss_params['num_cls_classes']} (从模型配置推断)", print_message=True)
+    
     log_info(f"损失函数配置: {json.dumps(loss_params, indent=2)}", print_message=False)
+    log_info(f"分类头：{loss_params['num_cls_classes']} 个类别 + 背景类（如果启用）", print_message=True)
+    log_info("分割头：固定为二元分割（前景/背景），基于Beta分布的EDL", print_message=True)
+    
+    # 验证模型和损失函数配置的一致性
+    model_non_object = model_config.get('predictor_non_object', True)
+    loss_non_object = loss_params.get('non_object', True)
+    if model_non_object != loss_non_object:
+        log_info(f"警告：模型和损失函数的non_object配置不一致！模型: {model_non_object}, 损失: {loss_non_object}", print_message=True)
+    
+    model_cls_classes = model_config.get('num_cls_classes', 12)
+    loss_cls_classes = loss_params['num_cls_classes']
+    if model_cls_classes != loss_cls_classes:
+        log_info(f"警告：模型和损失函数的num_cls_classes配置不一致！模型: {model_cls_classes}, 损失: {loss_cls_classes}", print_message=True)
+    
     loss_fn = SimpleEDLMaskformerLossV2(**loss_params)
     log_info("损失函数构建完成。", print_message=True)
 
@@ -541,97 +561,3 @@ def save_checkpoint(state, is_best, save_dir, epoch, last_checkpoints: deque, ma
             os.remove(old_ckpt)
     log_info(f"已保存检查点: {filename}", print_message=False)
 
-
-# ==============================================================================
-# 使用示例和测试
-# ==============================================================================
-if __name__ == '__main__':
-    
-    def simulate_and_test(B, N, C, H, W):
-        print(f"\n--- 测试数据集配置: B={B}, N={N}, C={C} ---")
-        
-        # 1. 模拟一个来自 RIGADatasetSimpleV2 的 batch
-        #    每个掩码都是随机的二值图像
-        mock_expert_masks = torch.randint(0, 2, (B, N, C, H, W), dtype=torch.float32).cuda()
-        mock_batch = {"expert_masks": mock_expert_masks}
-        
-        # 2. 调用处理函数
-        targets, metadata = process_batch_for_expert_class_combination(mock_batch)
-        
-        # 3. 验证输出
-        print("元数据 (metadata):")
-        print(f"  - 专家数 (N): {metadata['num_experts']}")
-        print(f"  - 原始类别数 (C): {metadata['num_classes']}")
-        print(f"  - 组合后总类别数 (N*C): {metadata['total_combined_classes']}")
-        print(f"  - 映射张量形状: {metadata['mapping_tensor'].shape}")
-        
-        # 打印部分映射关系以供检查
-        print("\n部分映射关系 (new_label -> [expert_id, class_id]):")
-        for i in list(range(min(5, N*C))) + list(range(max(0, N*C-5), N*C)):
-             new_label = i
-             expert_id = metadata['mapping_tensor'][new_label, 0].item()
-             class_id = metadata['mapping_tensor'][new_label, 1].item()
-             print(f"  - 组合标签 {new_label:2d} -> 专家 {expert_id}, 类别 {class_id}")
-
-        print("\nTargets 格式检查:")
-        print(f"  - `targets` 列表长度: {len(targets)} (应为 B={B})")
-        assert len(targets) == B
-        
-        first_sample_target = targets[0]
-        print(f"  - 第一个样本 'labels' 形状: {first_sample_target['labels'].shape} (应为 [{N*C}])")
-        assert first_sample_target['labels'].shape[0] == N * C
-        
-        print(f"  - 第一个样本 'masks' 形状: {first_sample_target['masks'].shape} (应为 [{N*C}, {H}, {W}])")
-        assert first_sample_target['masks'].shape == (N * C, H, W)
-        
-        # 验证数据内容是否一致
-        original_mask_sample = mock_batch['expert_masks'][0] # [N, C, H, W]
-        processed_mask_sample = first_sample_target['masks'].view(N, C, H, W)
-        assert torch.equal(original_mask_sample, processed_mask_sample)
-        print("  - 数据内容一致性检查通过!")
-        print("-" * (40))
-
-    # --- 运行不同配置的测试 ---
-    # RIGA 数据集情况
-    simulate_and_test(B=4, N=6, C=2, H=64, W=64)
-    
-    # 其他可能的数据集情况
-    simulate_and_test(B=8, N=4, C=1, H=32, W=32)
-    simulate_and_test(B=2, N=4, C=3, H=48, W=48)
-    
-    print("\n" + "="*80)
-    print("统一训练配置使用示例:")
-    print("="*80)
-    
-    # 示例配置
-    example_config = {
-        'epochs': 100,
-        'batch_size': 8,
-        'dataset_yaml': './codes/configs/RIGA.yaml',
-        'model': {
-            'num_cls_classes': 12,
-            'num_queries': 12,
-            'in_channels': 3
-        },
-        'loss': {
-            'num_classes': 2
-        },
-        'training': {
-            'learning_rate': 1e-3,
-            'optimizer_type': 'AdamW',
-            'weight_decay': 1e-4,
-            'use_cosine_scheduler': True,
-            'warmup_epochs': 10
-        }
-    }
-    
-    print("配置示例:")
-    print("training:")
-    print("  learning_rate: 1e-3      # 统一学习率声明")
-    print("  optimizer_type: 'AdamW'  # 优化器类型")
-    print("  weight_decay: 1e-4       # 权重衰减")
-    print("  use_cosine_scheduler: true")
-    print("  warmup_epochs: 10")
-    print("\n使用方法:")
-    print("model, loss_fn, train_loader, val_loader, optimizer, scheduler = build_complete_training_setup(config)")
-    print("="*80)

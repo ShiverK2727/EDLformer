@@ -62,6 +62,7 @@ model:
   predictor_pre_norm: false
   predictor_use_pos_emb: false
   predictor_non_object: true   # 支持背景类别 (实际分类输出维度为num_cls_classes+1=13)
+                               # 必须与loss.non_object保持一致
   
   # EDL专用配置
   predictor_cls_type: 'single'  # 单标签模式(Dirichlet)或多标签模式(Beta)
@@ -71,8 +72,9 @@ model:
   predictor_uncertainty_focus_ratio: 0.2  # 关注不确定性最高的20%像素
 
 # 损失函数配置 - SimpleEDLMaskformerLossV2
-# 注意：分割部分使用Beta分布处理二元前景-背景mask，每个query处理单独的对象
 loss:
+  num_cls_classes: 12         # 分类头类别数（不包含背景类），与model.num_cls_classes一致
+  # 注意：分割部分固定为二元分割（前景/背景），与num_cls_classes无关
   
   # 匈牙利匹配器配置
   matcher_cost_class: 2.0

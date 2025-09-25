@@ -383,7 +383,7 @@ def main(config, args, override_params):
     log_info("="*80 + "\nSimple MaskFormer Training Session Started\n" + "="*80, print_message=True)
     
     dataloader, val_dataloader = build_dataloaders(config)
-    model, loss_fn = build_simple_maskformer_components(config)
+    model, loss_fn = build_edl_components(config)
     optimizer = build_optimizer(model, config)
     scheduler = build_scheduler(optimizer, config)
     scaler = GradScaler(device='cuda') if config.get('use_amp', False) else None

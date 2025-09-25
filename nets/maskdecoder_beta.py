@@ -101,8 +101,10 @@ class MultiExpertsDecodeEDL(nn.Module):
             weight_init.c2_xavier_fill(self.input_proj[-1])
 
         # 分类头: 两个头分别用于alpha和beta，根据cls_type决定如何使用
-        self.alpha_cls_embed = nn.Linear(hidden_dim, self.num_cls_classes)
-        self.beta_cls_embed = nn.Linear(hidden_dim, self.num_cls_classes)
+        # 分类头输出维度 = num_cls_classes + (1 if non_object else 0)
+        cls_output_dim = self.num_cls_classes + (1 if self.non_object else 0)
+        self.alpha_cls_embed = nn.Linear(hidden_dim, cls_output_dim)
+        self.beta_cls_embed = nn.Linear(hidden_dim, cls_output_dim)
 
         # 分割头: 两个MLP头分别用于alpha和beta
         self.alpha_mask_embed = MLP(hidden_dim, hidden_dim, hidden_dim, 3)
