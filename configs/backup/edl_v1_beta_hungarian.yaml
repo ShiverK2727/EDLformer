@@ -1,0 +1,95 @@
+# EDL MaskFormer 配置版本1: EDL分类 + Beta分割 + 匈牙利匹配
+# 标准EDL训练配置，适合初次训练
+
+# 数据集配置
+dataset:
+  type: 'RIGA'
+  config_path: './codes/configs/RIGA.yaml'
+
+# 实验输出配置
+experiment:
+  save_dir: './exp/v1_edl_beta_hungarian'
+  max_checkpoints: 3
+  
+# 训练配置
+training:
+  seed: 42
+  epochs: 100
+  batch_size: 8
+  use_amp: true
+  num_workers: 4
+  
+  # 学习率配置
+  learning_rate: 1e-3
+  min_learning_rate: 1e-5
+  
+  # 优化器配置
+  optimizer_type: 'AdamW'
+  weight_decay: 1e-4
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  
+  # 调度器配置
+  use_cosine_scheduler: true
+  warmup_epochs: 10
+
+# 模型配置
+model:
+  in_channels: 3
+  num_cls_classes: 12  # 6专家 × 2类别
+  num_queries: 12
+  
+  # Backbone配置
+  backbone_encoder_name: "resnet34"
+  backbone_encoder_weights: "imagenet"
+  backbone_decoder_channels: [256, 128, 64, 32, 16]
+  backbone_use_batchnorm: true
+  
+  # 掩码特征配置
+  mask_dim: 64
+  mask_pixel_idxs: [-4, -3, -2]
+  
+  # Predictor配置
+  predictor_nheads: 8
+  predictor_dim_feedforward: 384
+  predictor_dec_layers: 3
+  predictor_non_object: true
+  
+  # EDL配置
+  predictor_cls_type: 'single'
+  predictor_attn_mask_type: 'uncertainty_ratio'
+  predictor_uncertainty_focus_ratio: 0.2
+
+# 损失函数配置 - EDL分类 + Beta分割
+loss:
+  num_cls_classes: 12
+  
+  # 匹配器配置
+  matcher_cost_class: 2.0
+  matcher_cost_dice: 5.0
+  matcher_cost_evidence: 1.0
+  matcher_cost_class_type: 'evidence'
+  
+  # 损失类型 - 核心配置
+  cls_loss_type: 'edl'         # EDL分类损失
+  seg_edl_as_dirichlet: false  # Beta分割损失
+  dice_on_logits: false
+  
+  # 权重配置
+  branch_weight_cls: 1.0
+  branch_weight_seg: 1.0
+  loss_weight_cls: 1.0
+  loss_weight_kl: 0.1
+  loss_weight_dice: 1.0
+  loss_weight_edl_mask: 1.0
+  
+  # 其他配置
+  eos_coef: 0.1
+  non_object: true
+  annealing_steps: 10000
+  use_direct_matching: false
+  
+  # 深监督
+  use_deep_supervision: true
+  ds_loss_weights: [1.0, 0.8, 0.6, 0.4]
+  ds_avg_type: 'sum'

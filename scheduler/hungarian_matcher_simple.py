@@ -152,7 +152,7 @@ class HungarianMatcher(nn.Module):
             indices.append((row_indices, col_indices))
 
         return [
-            (torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64))
+            (torch.as_tensor(i, dtype=torch.int64, device='cpu'), torch.as_tensor(j, dtype=torch.int64, device='cpu'))
             for i, j in indices
         ]
 

@@ -137,12 +137,18 @@ class MultiExpertsDecodeEDL(nn.Module):
             pred_prob = alpha / (alpha + beta)
             attn_mask = F.interpolate(pred_prob, size=attn_mask_target_size, mode="bilinear", align_corners=False)
             attn_mask = attn_mask < self.mask_threshold # 直接比较概率值
+            # 展平空间维度以保持一致的3维格式 (b, q, H'*W')
+            b, q, h, w = attn_mask.shape
+            attn_mask = attn_mask.flatten(2)
 
         elif self.attn_mask_type == 'uncertainty_threshold':
             total_evidence = alpha + beta
             uncertainty = 2.0 / (total_evidence + 1e-6)
             attn_mask = F.interpolate(uncertainty, size=attn_mask_target_size, mode="bilinear", align_corners=False)
             attn_mask = attn_mask < self.uncertainty_threshold # 不确定性低的区域被mask
+            # 展平空间维度以保持一致的3维格式 (b, q, H'*W')
+            b, q, h, w = attn_mask.shape
+            attn_mask = attn_mask.flatten(2)
 
         elif self.attn_mask_type == 'uncertainty_ratio':
             # 新增: 基于不确定性百分比的动态阈值方法

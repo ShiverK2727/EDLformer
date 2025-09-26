@@ -21,9 +21,22 @@ def batch_dice_loss(inputs_prob: torch.Tensor, targets: torch.Tensor):
     """
     inputs = inputs_prob.flatten(1)
     targets = targets.flatten(1)
+    
+    # 确保数值稳定性
+    inputs = torch.clamp(inputs, min=1e-8, max=1.0)
+    targets = torch.clamp(targets, min=0.0, max=1.0)
+    
     numerator = 2 * torch.einsum("nc,mc->nm", inputs, targets)
     denominator = inputs.sum(-1)[:, None] + targets.sum(-1)[None, :]
+    
+    # 防止除零
+    denominator = torch.clamp(denominator, min=1e-8)
     loss = 1 - (numerator + 1) / (denominator + 1)
+    
+    # 检查并修复无效值
+    loss = torch.where(torch.isnan(loss) | torch.isinf(loss), torch.tensor(1.0, device=loss.device), loss)
+    loss = torch.clamp(loss, min=0.0, max=1.0)
+    
     return loss
 
 
@@ -96,7 +109,8 @@ class HungarianMatcherEDL_V3(nn.Module):
             alpha_mask = F.softplus(out_alpha_mask_logit) + 1
             beta_mask = F.softplus(out_beta_mask_logit) + 1
             
-            tgt_mask = (targets[b]["masks"] > 0).float().to(alpha_mask)
+            # 确保目标张量在正确设备上，且数据类型一致
+            tgt_mask = (targets[b]["masks"] > 0).float().to(device=alpha_mask.device, dtype=alpha_mask.dtype)
 
             with autocast(device_type="cuda", enabled=False):
                 cost_evidence = torch.tensor(0.0, device=alpha_mask.device)
@@ -123,6 +137,6 @@ class HungarianMatcherEDL_V3(nn.Module):
             indices.append((row_indices, col_indices))
 
         return [
-            (torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64))
+            (torch.as_tensor(i, dtype=torch.int64, device='cpu'), torch.as_tensor(j, dtype=torch.int64, device='cpu'))
             for i, j in indices
         ]

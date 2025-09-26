@@ -54,128 +54,66 @@ def load_config(yaml_path):
 # ==============================================================================
 
 def build_edl_components(config):
-    """
-    [统一构建器] 根据新的配置结构构建模型、损失函数和数据集。
-    """
+    """根据配置构建模型、损失函数和数据集，并返回元数据。"""
     model_config = config['model']
     loss_config = config.get('loss', {})
     training_config = config.get('training', {})
     dataset_config = config.get('dataset', {})
-    
-    # 参数验证
-    required_model_params = ['num_cls_classes', 'num_queries']
-    for param in required_model_params:
-        if param not in model_config:
-            raise ValueError(f"模型配置中缺少必需参数: {param}")
-    
-    # 1. 构建模型
-    log_info("="*80, print_message=True)
-    log_info("构建 FlexibleEDLMaskFormer 模型...", print_message=True)
-    log_info(f"模型配置: {json.dumps(model_config, indent=2)}", print_message=False)
-    model = FlexibleEDLMaskFormer(**model_config)
-    log_info("模型构建完成。", print_message=True)
-
-    # 2. 构建损失函数
-    log_info("="*80, print_message=True)
-    log_info("构建 SimpleEDLMaskformerLossV2 损失函数...", print_message=True)
-    loss_params = {k: v for k, v in loss_config.items()}
-    # 确保num_cls_classes参数存在（用于分类头）
-    if 'num_cls_classes' not in loss_params:
-        # 从模型配置获取分类类别数
-        loss_params['num_cls_classes'] = model_config.get('num_cls_classes', 12)
-        log_info(f"自动设置 num_cls_classes = {loss_params['num_cls_classes']} (从模型配置推断)", print_message=True)
-    
-    log_info(f"损失函数配置: {json.dumps(loss_params, indent=2)}", print_message=False)
-    log_info(f"分类头：{loss_params['num_cls_classes']} 个类别 + 背景类（如果启用）", print_message=True)
-    log_info("分割头：固定为二元分割（前景/背景），基于Beta分布的EDL", print_message=True)
-    
-    # 验证模型和损失函数配置的一致性
-    model_non_object = model_config.get('predictor_non_object', True)
-    loss_non_object = loss_params.get('non_object', True)
-    if model_non_object != loss_non_object:
-        log_info(f"警告：模型和损失函数的non_object配置不一致！模型: {model_non_object}, 损失: {loss_non_object}", print_message=True)
-    
-    model_cls_classes = model_config.get('num_cls_classes', 12)
-    loss_cls_classes = loss_params['num_cls_classes']
-    if model_cls_classes != loss_cls_classes:
-        log_info(f"警告：模型和损失函数的num_cls_classes配置不一致！模型: {model_cls_classes}, 损失: {loss_cls_classes}", print_message=True)
-    
-    loss_fn = SimpleEDLMaskformerLossV2(**loss_params)
-    log_info("损失函数构建完成。", print_message=True)
-
-    # 3. 构建数据集
-    log_info("="*80, print_message=True)
-    log_info("构建数据集...", print_message=True)
-    
-    # 从新的配置结构中获取数据集配置
-    dataset_yaml = dataset_config.get('config_path') or config.get('dataset_yaml')  # 兼容旧配置
+    dataset_yaml = dataset_config.get('config_path')
+    # 修复相对路径问题
+    if dataset_yaml and not os.path.isabs(dataset_yaml):
+        dataset_yaml = os.path.join('/app/MultiAnn/EDLformer', dataset_yaml.lstrip('./'))
     if not dataset_yaml or not os.path.exists(dataset_yaml):
         raise FileNotFoundError(f"数据集配置文件不存在: {dataset_yaml}")
-    
     train_dataset = RIGADatasetSimpleV2(config_path=dataset_yaml, is_train=True)
     val_dataset = RIGADatasetSimpleV2(config_path=dataset_yaml, is_train=False)
+    train_loader = DataLoader(train_dataset, batch_size=training_config.get('batch_size', 8), shuffle=True, num_workers=training_config.get('num_workers', 4), pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=training_config.get('num_workers', 4), pin_memory=True)
+    sample_data = train_dataset[0]
+    expert_masks_shape = sample_data["expert_masks"].shape
+    log_info(f"数据集expert_masks形状: {expert_masks_shape}", print_message=True)
     
-    # 从training配置中获取批处理大小
-    batch_size = training_config.get('batch_size', 8)
-    num_workers = training_config.get('num_workers', 4)
-    
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=num_workers, pin_memory=True)
-    log_info(f"数据集构建完成。训练集: {len(train_dataset)}样本, 验证集: {len(val_dataset)}样本。", print_message=True)
-    log_info(f"批处理大小: {batch_size}, 工作线程数: {num_workers}", print_message=True)
-    log_info("="*80, print_message=True)
+    if len(expert_masks_shape) == 4:
+        # 形状: (num_experts, num_seg_classes, H, W)
+        num_experts, num_seg_classes, _, _ = expert_masks_shape
+    elif len(expert_masks_shape) == 5:
+        # 形状: (1, num_experts, num_seg_classes, H, W)
+        _, num_experts, num_seg_classes, _, _ = expert_masks_shape
+    else:
+        raise ValueError(f"不支持的expert_masks形状: {expert_masks_shape}")
+    total_combined_classes = num_experts * num_seg_classes
+    dataset_metadata = {'num_experts': num_experts, 'num_seg_classes': num_seg_classes, 'total_combined_classes': total_combined_classes}
+    log_info(f"数据集构建完成。动态推断: {num_experts}专家, {num_seg_classes}分割类别, {total_combined_classes}组合类别。", print_message=True)
+    if model_config.get('num_cls_classes') != total_combined_classes:
+        log_info(f"警告: 模型配置'num_cls_classes'({model_config.get('num_cls_classes')})与推断值({total_combined_classes})不匹配。", print_message=True)
+    model = FlexibleEDLMaskFormer(**model_config)
+    log_info("模型构建完成。", print_message=True)
+    loss_params = {k: v for k, v in loss_config.items()}
+    loss_params['num_cls_classes'] = total_combined_classes
+    loss_fn = SimpleEDLMaskformerLossV2(**loss_params)
+    log_info("损失函数构建完成。", print_message=True)
+    return model.cuda(), loss_fn, train_loader, val_loader, dataset_metadata
 
-    return model.cuda(), loss_fn, train_loader, val_loader
-
-
-def build_complete_training_setup(config, args=None, save_override_record_flag=True):
-    """
-    构建完整的训练设置，包括模型、损失函数、数据集、优化器和调度器。
-    
-    Args:
-        config: 配置字典
-        args: 命令行参数（可选）
-        save_override_record_flag: 是否保存覆写记录
-    
-    Returns:
-        tuple: (model, loss_fn, train_loader, val_loader, optimizer, scheduler)
-    """
+def build_complete_training_setup(config, args):
+    """构建完整的训练设置，并应用参数覆写。"""
     log_info("="*80, print_message=True)
-    log_info("构建完整训练设置", print_message=True)
-    log_info("="*80, print_message=True)
+    log_info("开始构建完整训练设置...", print_message=True)
     
-    # 处理参数覆写
-    override_params = {}
-    if args is not None:
-        original_config = config.copy()
-        config, override_params = apply_args_override(config, args)
-        
-        # 显示覆写摘要
+    # [关键改动] 应用命令行参数覆写
+    config, override_params = apply_args_override(config, args)
+    if override_params:
         print_override_summary(override_params)
-        
-        # 保存覆写记录
-        if save_override_record_flag and override_params:
-            save_dir = config.get('experiment', {}).get('save_dir', './exp/default')
-            save_override_record(config, override_params, args, save_dir)
     
-    # 设置随机种子
-    training_config = config.get('training', {})
-    seed = training_config.get('seed', 42)
-    set_seed(seed)
-    
-    # 1. 构建模型、损失函数和数据集
-    model, loss_fn, train_loader, val_loader = build_edl_components(config)
-    
-    # 2. 构建优化器和调度器
-    log_info("构建优化器和学习率调度器...", print_message=True)
+    model, loss_fn, train_loader, val_loader, dataset_metadata = build_edl_components(config)
     optimizer, scheduler = build_optimizer_and_scheduler(model, config)
     
-    log_info("="*80, print_message=True)
-    log_info("完整训练设置构建完成", print_message=True)
+    log_info("完整训练设置构建完成。", print_message=True)
     log_info(f"🎯 实验保存目录: {config.get('experiment', {}).get('save_dir', 'N/A')}", print_message=True)
     log_info("="*80, print_message=True)
     
-    return model, loss_fn, train_loader, val_loader, optimizer, scheduler
+    # [关键改动] 返回覆写记录，供主函数保存
+    return model, loss_fn, train_loader, val_loader, optimizer, scheduler, dataset_metadata, config, override_params
+
 
 
 def build_optimizer_and_scheduler(model, config):
@@ -299,7 +237,7 @@ def process_batch_for_expert_class_combination(
     # 形状为 (B, N*C)
     total_combined_classes = N * C
     new_labels = torch.arange(total_combined_classes, device=device).repeat(B, 1)
-    print(f"new_labels: {new_labels}")
+    # print(f"new_labels: {new_labels}")
 
     # 3. 重塑掩码以匹配新标签
     # 将专家和类别维度合并
@@ -320,15 +258,15 @@ def process_batch_for_expert_class_combination(
     
     # [0, 0, ..., 1, 1, ..., N-1, N-1, ...] (每个重复C次)
     expert_ids_map = torch.arange(N, device=device).view(N, 1).repeat(1, C).view(-1)
-    print(f"expert_ids_map: {expert_ids_map}")
+    # print(f"expert_ids_map: {expert_ids_map}")
     
     # [0, 1, ..., C-1, 0, 1, ..., C-1, ...] (重复N次)
     class_ids_map = torch.arange(C, device=device).repeat(N)
-    print(f"class_ids_map: {class_ids_map}")
+    # print(f"class_ids_map: {class_ids_map}")
 
     # 将它们堆叠成 [N*C, 2] 的映射关系
     mapping_tensor = torch.stack([expert_ids_map, class_ids_map], dim=1)
-    print(f"mapping_tensor: {mapping_tensor}")
+    # print(f"mapping_tensor: {mapping_tensor}")
 
     metadata = {
         'num_experts': N,
@@ -449,7 +387,6 @@ def apply_args_override(config, args):
     
     return config, override_params
 
-
 def save_override_record(config, override_params, args, save_dir):
     """保存详细的参数覆写记录到文件。"""
     if not override_params:
@@ -513,33 +450,12 @@ def save_override_record(config, override_params, args, save_dir):
     
     log_info(f"参数覆写记录已保存到: {override_path}", print_message=True)
 
-
-def identify_overridden_params(args):
-    """识别哪些参数通过命令行进行了覆写。"""
-    overridden_params = []
-    
-    for arg_name, arg_value in vars(args).items():
-        if arg_value is not None and arg_name not in ['config_path', 'gpu', 'resume']:
-            overridden_params.append(arg_name)
-    
-    return overridden_params
-
-
 def print_override_summary(override_params):
-    """打印参数覆写摘要。"""
-    if not override_params:
-        log_info("✅ 未检测到参数覆写，使用配置文件中的默认值。", print_message=True)
-        return
-    
+    """在控制台打印参数覆写摘要。"""
     log_info("="*60, print_message=True)
     log_info(f"🔧 检测到 {len(override_params)} 个参数覆写:", print_message=True)
-    log_info("="*60, print_message=True)
-    
     for config_path, change_info in override_params.items():
-        original_val = change_info['original']
-        override_val = change_info['override']
-        log_info(f"📝 {config_path}: {original_val} → {override_val}", print_message=True)
-    
+        log_info(f"  - {config_path}: {change_info['original']} → {change_info['override']}", print_message=True)
     log_info("="*60, print_message=True)
             
 
@@ -563,6 +479,35 @@ def save_checkpoint(state, is_best, save_dir, epoch, last_checkpoints: deque, ma
     log_info(f"已保存检查点: {filename}", print_message=False)
 
 
+def load_checkpoint(checkpoint_path, model, optimizer=None, scaler=None):
+    """加载模型检查点。"""
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"检查点文件不存在: {checkpoint_path}")
+    
+    log_info(f"正在加载检查点: {checkpoint_path}", print_message=True)
+    checkpoint = torch.load(checkpoint_path, map_location='cuda')
+    
+    # 加载模型状态
+    model.load_state_dict(checkpoint['state_dict'])
+    
+    # 加载优化器状态
+    if optimizer is not None and 'optimizer' in checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        log_info("优化器状态已加载", print_message=True)
+    
+    # 加载激活函数缩放器状态
+    if scaler is not None and 'scaler' in checkpoint and checkpoint['scaler'] is not None:
+        scaler.load_state_dict(checkpoint['scaler'])
+        log_info("AMP Scaler状态已加载", print_message=True)
+    
+    start_epoch = checkpoint.get('epoch', 0)
+    best_metric_score = checkpoint.get('best_metric_score', -np.inf)
+    
+    log_info(f"检查点加载完成: epoch={start_epoch}, best_score={best_metric_score:.6f}", print_message=True)
+    
+    return start_epoch, best_metric_score
+
+
 
 # ==============================================================================
 # TensorBoard 日志记录器
@@ -580,13 +525,37 @@ class TensorboardLogger:
 
     def log_validation_metrics(self, metrics, train_losses, learning_rate, epoch):
         """记录验证指标、平均训练损失和学习率。"""
-        # 记录平均训练损失
-        self.writer.add_scalar('Loss/train_avg_total', train_losses['total_loss'], epoch)
+        # 记录平均训练损失（所有分量）
+        for loss_name, loss_value in train_losses.items():
+            self.writer.add_scalar(f'Loss/train_avg_{loss_name}', loss_value, epoch)
 
-        # 记录验证指标
+        # 记录软 Dice 分数（按类别）
         soft_dice = metrics.get('soft_dice', {})
         for metric_name, value in soft_dice.items():
             self.writer.add_scalar(f'Metrics/soft_dice_{metric_name}', value, epoch)
+        
+        # 记录个性化指标 - dice_per_expert
+        dice_per_expert = metrics.get('dice_per_expert', {})
+        for class_name, expert_scores in dice_per_expert.items():
+            if isinstance(expert_scores, list):
+                for expert_idx, score in enumerate(expert_scores):
+                    self.writer.add_scalar(f'Personalization/dice_per_expert_{class_name}_expert_{expert_idx}', score, epoch)
+                # 记录平均值
+                avg_score = sum(expert_scores) / len(expert_scores) if expert_scores else 0.0
+                self.writer.add_scalar(f'Personalization/dice_per_expert_{class_name}_avg', avg_score, epoch)
+        
+        # 记录其他个性化指标
+        dice_max = metrics.get('dice_max', {})
+        dice_match = metrics.get('dice_match', {})
+        for class_name in ['disc', 'cup', 'overall']:
+            if class_name in dice_max:
+                self.writer.add_scalar(f'Personalization/dice_max_{class_name}', dice_max[class_name], epoch)
+            if class_name in dice_match:
+                self.writer.add_scalar(f'Personalization/dice_match_{class_name}', dice_match[class_name], epoch)
+        
+        # 记录GED指标
+        if 'ged' in metrics:
+            self.writer.add_scalar('Metrics/ged', metrics['ged'], epoch)
         
         # 记录学习率
         self.writer.add_scalar('Learning_Rate', learning_rate, epoch)
@@ -603,8 +572,14 @@ class TensorboardLogger:
 def log_epoch_summary(epoch, total_epochs, train_losses, val_metrics):
     """在控制台打印每个epoch的训练和验证摘要。"""
     log_info(f"--- Epoch {epoch + 1}/{total_epochs} Summary ---", print_message=True)
-    log_info(f"  - Avg Train Loss (Total): {train_losses.get('total_loss', 0):.6f}", print_message=True)
     
+    # 记录训练损失（所有分量）
+    log_info(f"  - Avg Train Loss (Total): {train_losses.get('total_loss', 0):.6f}", print_message=True)
+    for loss_name, loss_value in train_losses.items():
+        if loss_name != 'total_loss':
+            log_info(f"    - {loss_name}: {loss_value:.6f}", print_message=True)
+    
+    # 记录软 Dice 分数（按类别）
     soft_dice = val_metrics.get('soft_dice', {})
     mean_dice = soft_dice.get('mean', 0)
     disc_dice = soft_dice.get('disc', 0)
@@ -612,5 +587,119 @@ def log_epoch_summary(epoch, total_epochs, train_losses, val_metrics):
     
     log_info(f"  - Validation Soft Dice Mean: {mean_dice:.6f}", print_message=True)
     log_info(f"    - Disc: {disc_dice:.4f}, Cup: {cup_dice:.4f}", print_message=True)
+    
+    # 记录个性化指标
+    dice_per_expert = val_metrics.get('dice_per_expert', {})
+    dice_max = val_metrics.get('dice_max', {})
+    dice_match = val_metrics.get('dice_match', {})
+    
+    if dice_per_expert:
+        log_info(f"  - Dice Per Expert:", print_message=True)
+        for class_name, expert_scores in dice_per_expert.items():
+            if isinstance(expert_scores, list) and expert_scores:
+                avg_score = sum(expert_scores) / len(expert_scores)
+                scores_str = ', '.join([f"{score:.4f}" for score in expert_scores])
+                log_info(f"    - {class_name}: [{scores_str}] (avg: {avg_score:.4f})", print_message=True)
+    
+    if dice_max:
+        log_info(f"  - Dice Max:", print_message=True)
+        for class_name, score in dice_max.items():
+            log_info(f"    - {class_name}: {score:.4f}", print_message=True)
+    
+    if dice_match:
+        log_info(f"  - Dice Match:", print_message=True)
+        for class_name, score in dice_match.items():
+            log_info(f"    - {class_name}: {score:.4f}", print_message=True)
+    
+    # 记录GED指标
+    if 'ged' in val_metrics:
+        log_info(f"  - GED: {val_metrics['ged']:.6f}", print_message=True)
+    
     log_info("-" * 40, print_message=True)
 
+
+def save_final_results(save_dir, best_metrics, last_metrics, config):
+    """将最终的训练结果摘要保存到文本文件。"""
+    path = os.path.join(save_dir, 'final_training_summary.txt')
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write("="*80 + "\n")
+        f.write("训练完成 - 最终结果摘要\n")
+        f.write("="*80 + "\n\n")
+        
+        f.write(f"实验目录: {save_dir}\n")
+        f.write(f"总训练轮数: {config['training']['epochs']}\n\n")
+
+        f.write("--- 最佳Epoch指标 ---\n")
+        f.write(f"最佳轮次: {best_metrics.get('epoch', -1) + 1}\n")
+        
+        # Soft Dice 指标
+        best_dice = best_metrics.get('metrics', {}).get('soft_dice', {})
+        f.write(f"  - Soft Dice Mean: {best_dice.get('mean', 0):.6f}\n")
+        f.write(f"  - Soft Dice Disc: {best_dice.get('disc', 0):.6f}\n")
+        f.write(f"  - Soft Dice Cup: {best_dice.get('cup', 0):.6f}\n")
+        
+        # 个性化指标
+        best_metrics_data = best_metrics.get('metrics', {})
+        best_dice_max = best_metrics_data.get('dice_max', {})
+        best_dice_match = best_metrics_data.get('dice_match', {})
+        best_dice_per_expert = best_metrics_data.get('dice_per_expert', {})
+        
+        if best_dice_max:
+            f.write(f"  - Dice Max Overall: {best_dice_max.get('overall', 0):.6f}\n")
+            f.write(f"  - Dice Max Disc: {best_dice_max.get('disc', 0):.6f}\n")
+            f.write(f"  - Dice Max Cup: {best_dice_max.get('cup', 0):.6f}\n")
+        
+        if best_dice_match:
+            f.write(f"  - Dice Match Overall: {best_dice_match.get('overall', 0):.6f}\n")
+            f.write(f"  - Dice Match Disc: {best_dice_match.get('disc', 0):.6f}\n")
+            f.write(f"  - Dice Match Cup: {best_dice_match.get('cup', 0):.6f}\n")
+        
+        if best_dice_per_expert:
+            f.write(f"  - Dice Per Expert:\n")
+            for class_name, expert_scores in best_dice_per_expert.items():
+                if isinstance(expert_scores, list) and expert_scores:
+                    avg_score = sum(expert_scores) / len(expert_scores)
+                    scores_str = ', '.join([f"{score:.4f}" for score in expert_scores])
+                    f.write(f"    - {class_name}: [{scores_str}] (avg: {avg_score:.4f})\n")
+        
+        if 'ged' in best_metrics_data:
+            f.write(f"  - GED: {best_metrics_data['ged']:.6f}\n")
+        f.write("\n")
+        
+        f.write("--- 最后Epoch指标 ---\n")
+        f.write(f"最后轮次: {last_metrics.get('epoch', -1) + 1}\n")
+        
+        # Soft Dice 指标
+        last_dice = last_metrics.get('metrics', {}).get('soft_dice', {})
+        f.write(f"  - Soft Dice Mean: {last_dice.get('mean', 0):.6f}\n")
+        f.write(f"  - Soft Dice Disc: {last_dice.get('disc', 0):.6f}\n")
+        f.write(f"  - Soft Dice Cup: {last_dice.get('cup', 0):.6f}\n")
+        
+        # 个性化指标
+        last_metrics_data = last_metrics.get('metrics', {})
+        last_dice_max = last_metrics_data.get('dice_max', {})
+        last_dice_match = last_metrics_data.get('dice_match', {})
+        last_dice_per_expert = last_metrics_data.get('dice_per_expert', {})
+        
+        if last_dice_max:
+            f.write(f"  - Dice Max Overall: {last_dice_max.get('overall', 0):.6f}\n")
+            f.write(f"  - Dice Max Disc: {last_dice_max.get('disc', 0):.6f}\n")
+            f.write(f"  - Dice Max Cup: {last_dice_max.get('cup', 0):.6f}\n")
+        
+        if last_dice_match:
+            f.write(f"  - Dice Match Overall: {last_dice_match.get('overall', 0):.6f}\n")
+            f.write(f"  - Dice Match Disc: {last_dice_match.get('disc', 0):.6f}\n")
+            f.write(f"  - Dice Match Cup: {last_dice_match.get('cup', 0):.6f}\n")
+        
+        if last_dice_per_expert:
+            f.write(f"  - Dice Per Expert:\n")
+            for class_name, expert_scores in last_dice_per_expert.items():
+                if isinstance(expert_scores, list) and expert_scores:
+                    avg_score = sum(expert_scores) / len(expert_scores)
+                    scores_str = ', '.join([f"{score:.4f}" for score in expert_scores])
+                    f.write(f"    - {class_name}: [{scores_str}] (avg: {avg_score:.4f})\n")
+        
+        if 'ged' in last_metrics_data:
+            f.write(f"  - GED: {last_metrics_data['ged']:.6f}\n")
+        f.write("\n")
+    log_info(f"最终结果摘要已保存至: {path}", print_message=True)

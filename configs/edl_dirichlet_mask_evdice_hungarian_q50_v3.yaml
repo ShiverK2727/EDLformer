@@ -1,0 +1,109 @@
+# EDL MaskFormer 配置: EDL分类 + Dirichlet分割 + 匈牙利匹配 (完整EDL)
+# 命名含义: edl_分类损失_分割损失_匹配方式_特殊标识
+
+# 数据集配置
+dataset:
+  type: 'RIGA'
+  config_path: './codes/configs/RIGA.yaml'
+
+# 实验输出配置
+experiment:
+  save_dir: './exp/edl_dirichlet_hungarian_full'
+  max_checkpoints: 3
+  
+# 训练配置
+training:
+  seed: 42
+  epochs: 100
+  batch_size: 8 
+  use_amp: true
+  num_workers: 4  # 优化CPU使用
+  
+  # 学习率配置 - 更保守的学习率
+  learning_rate: 0.005
+  min_learning_rate: 0.00001
+  
+  # 优化器配置
+  optimizer_type: 'AdamW'
+  weight_decay: 1.5e-4  # 更强正则化
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  
+  # 调度器配置
+  use_cosine_scheduler: true
+  warmup_epochs: 20
+
+# 模型配置
+model:
+  # 基础配置
+  in_channels: 3
+  num_cls_classes: 12
+  num_queries: 50
+  
+  # Backbone编码器配置
+  backbone_encoder_name: "resnet34"
+  backbone_encoder_weights: "imagenet"
+  
+  # Backbone解码器(像素级别)配置
+  backbone_decoder_channels: [256, 128, 64, 32, 16]
+  backbone_use_batchnorm: true
+  backbone_upsample_mode: 'interp'
+  
+  # 掩码特征配置
+  mask_dim: 64
+  mask_pixel_idxs: [-4, -3, -2]
+  
+  # Predictor(Transformer)配置
+  predictor_nheads: 8
+  predictor_dim_feedforward: 256
+  predictor_dec_layers: 3
+  predictor_pre_norm: false
+  predictor_use_pos_emb: false
+  predictor_non_object: true
+  
+  # EDL特殊配置
+  predictor_cls_type: 'single'  # 'single' 或 'multi'
+  predictor_attn_mask_type: 'mask'  # 'mask', 'uncertainty', 'uncertainty_ratio'
+  predictor_mask_threshold: 0.5
+  predictor_uncertainty_threshold: 0.5
+  predictor_uncertainty_focus_ratio: 0.3
+
+# 损失函数配置 - EDL分类 + Dirichlet分割 + 匈牙利匹配
+loss:
+  # 基础配置
+  num_cls_classes: 12
+  
+  # 匹配器配置
+  matcher_cost_class: 2.0
+  matcher_cost_dice: 5.0
+  matcher_cost_evidence: 5.0
+  matcher_cost_class_type: 'evidence'  # 'evidence' 或 'prob'
+  
+  # 损失类型配置  
+  cls_loss_type: 'edl'           # 'edl' 或 'ce'
+  seg_edl_as_dirichlet: true     # Dirichlet分割损失 (完整EDL)
+  dice_on_logits: true           # false: dice基于概率, true: dice基于logits
+  
+  # 分支权重配置
+  branch_weight_cls: 2.0         # 分类分支总权重
+  branch_weight_seg: 5.0         # 分割分支总权重
+  
+  # 分类分支子权重
+  loss_weight_cls: 1.0           # 分类损失权重
+  loss_weight_kl: 0.10           # KL散度正则化权重
+  
+  # 分割分支子权重
+  loss_weight_dice: 1.0          # Dice损失权重
+  loss_weight_edl_mask: 1.0      # EDL分割损失权重
+  
+  # 其他关键配置
+  eos_coef: 1                 # 背景类权重
+  non_object: true               # 是否包含背景类
+  annealing_steps: 20000         # EDL退火步数
+  use_direct_matching: false     # false: 匈牙利匹配, true: 直接匹配
+  log_interval: 100              # 日志记录间隔
+  
+  # 深监督配置
+  use_deep_supervision: false    # 是否启用深监督
+  ds_loss_weights: [1.0, 0.5, 0.25]  # 深监督各层权重
+  ds_avg_type: 'mean_aux'        # 深监督聚合方式: 'sum', 'mean_aux', 'mean_all'

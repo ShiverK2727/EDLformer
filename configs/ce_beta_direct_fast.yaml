@@ -1,0 +1,95 @@
+# EDL MaskFormer 配置: CE分类 + Beta分割 + 直接匹配 (快速训练)
+# 命名含义: ce_分类损失_分割损失_匹配方式_特殊标识
+
+# 数据集配置
+dataset:
+  type: 'RIGA'
+  config_path: './codes/configs/RIGA.yaml'
+
+# 实验输出配置
+experiment:
+  save_dir: './exp/ce_beta_direct_fast'
+  max_checkpoints: 3
+  
+# 训练配置
+training:
+  seed: 42
+  epochs: 80    # 更少训练轮数
+  batch_size: 10  # 更大batch size加速训练
+  use_amp: true
+  num_workers: 4
+  
+  # 学习率配置 - 更激进的学习率
+  learning_rate: 0.001
+  min_learning_rate: 1e-6
+  
+  # 优化器配置
+  optimizer_type: 'AdamW'
+  weight_decay: 8e-5  # 更少正则化
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  
+  # 调度器配置
+  use_cosine_scheduler: true
+  warmup_epochs: 5   # 更短warmup
+
+# 模型配置
+model:
+  in_channels: 3
+  num_cls_classes: 12
+  num_queries: 12
+  
+  # Backbone配置
+  backbone_encoder_name: "resnet34"
+  backbone_encoder_weights: "imagenet"
+  backbone_decoder_channels: [256, 128, 64, 32, 16]
+  backbone_use_batchnorm: true
+  
+  # 掩码特征配置
+  mask_dim: 64
+  mask_pixel_idxs: [-4, -3, -2]
+  
+  # Predictor配置 - 简化配置
+  predictor_nheads: 8
+  predictor_dim_feedforward: 256
+  predictor_dec_layers: 2   # 减少层数
+  predictor_non_object: true
+  
+  # EDL配置
+  predictor_cls_type: 'single'
+  predictor_attn_mask_type: 'uncertainty_ratio'
+  predictor_uncertainty_focus_ratio: 0.3
+
+# 损失函数配置 - CE分类 + Beta分割 + 直接匹配
+loss:
+  num_cls_classes: 12
+  
+  # 匹配器配置 - 简化匹配成本
+  matcher_cost_class: 1.0
+  matcher_cost_dice: 2.0
+  matcher_cost_evidence: 0.5
+  matcher_cost_class_type: 'prob'  # CE模式使用概率
+  
+  # 损失类型配置
+  cls_loss_type: 'ce'            # CE分类损失 (非EDL)
+  seg_edl_as_dirichlet: false    # Beta分割损失
+  dice_on_logits: true           # CE模式在logits上计算dice
+  
+  # 权重配置 - 简化权重
+  branch_weight_cls: 1.0
+  branch_weight_seg: 1.0
+  loss_weight_cls: 2.0    # 增强分类权重
+  loss_weight_kl: 0.0     # CE模式不使用KL损失
+  loss_weight_dice: 1.0
+  loss_weight_edl_mask: 0.8
+  
+  # 其他配置
+  eos_coef: 0.1
+  non_object: true
+  annealing_steps: 5000   # 更短退火
+  use_direct_matching: true  # 使用直接匹配
+  
+  # 深监督
+  use_deep_supervision: false
+  ds_loss_weights: [1.0, 0.5]
+  ds_avg_type: 'mean'

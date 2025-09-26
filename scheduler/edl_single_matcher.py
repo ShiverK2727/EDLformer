@@ -144,4 +144,4 @@ class EDLHungarianMatcher(nn.Module):
         # This part still requires a loop as scipy.optimize.linear_sum_assignment is not batched
         indices = [linear_sum_assignment(c.cpu()) for c in C]
         
-        return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
+        return [(torch.as_tensor(i, dtype=torch.int64, device='cpu'), torch.as_tensor(j, dtype=torch.int64, device='cpu')) for i, j in indices]

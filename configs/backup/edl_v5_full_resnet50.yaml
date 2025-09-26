@@ -1,0 +1,95 @@
+# EDL MaskFormer: EDL分类 + Dirichlet分割 + ResNet50 + 匈牙利匹配
+# 特点: Evidence Deep Learning分类损失 + Dirichlet分布分割损失 + ResNet50 Backbone + Hungarian匹配算法
+
+# 数据集配置
+dataset:
+  type: 'RIGA'
+  config_path: './codes/configs/RIGA.yaml'
+
+# 实验输出配置
+experiment:
+  save_dir: './exp/v5_full_edl_resnet50'
+  max_checkpoints: 5  # 保存更多检查点
+  
+# 训练配置
+training:
+  seed: 42
+  epochs: 150  # 更多训练轮数
+  batch_size: 4   # 更大模型需要更小batch size
+  use_amp: true
+  num_workers: 4
+  
+  # 学习率配置 - 更保守的学习率
+  learning_rate: 5e-4
+  min_learning_rate: 1e-6
+  
+  # 优化器配置
+  optimizer_type: 'AdamW'
+  weight_decay: 2e-4  # 更强的正则化
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  
+  # 调度器配置
+  use_cosine_scheduler: true
+  warmup_epochs: 20
+
+# 模型配置
+model:
+  in_channels: 3
+  num_cls_classes: 12
+  num_queries: 12
+  
+  # Backbone配置 - 使用ResNet50
+  backbone_encoder_name: "resnet50"
+  backbone_encoder_weights: "imagenet"
+  backbone_decoder_channels: [512, 256, 128, 64, 32]  # 更大的通道数
+  backbone_use_batchnorm: true
+  
+  # 掩码特征配置
+  mask_dim: 128  # 更大的mask维度
+  mask_pixel_idxs: [-4, -3, -2]
+  
+  # Predictor配置 - 更强的Transformer
+  predictor_nheads: 8
+  predictor_dim_feedforward: 512  # 更大的FFN
+  predictor_dec_layers: 4         # 更多层
+  predictor_non_object: true
+  
+  # EDL配置
+  predictor_cls_type: 'single'
+  predictor_attn_mask_type: 'uncertainty_ratio'
+  predictor_uncertainty_focus_ratio: 0.25
+
+# 损失函数配置 - 完整EDL配置
+loss:
+  num_cls_classes: 12
+  
+  # 匹配器配置 - 更精细的匹配
+  matcher_cost_class: 3.0
+  matcher_cost_dice: 6.0
+  matcher_cost_evidence: 2.0
+  matcher_cost_class_type: 'evidence'
+  
+  # 损失类型 - 完整EDL
+  cls_loss_type: 'edl'        # EDL分类损失
+  seg_edl_as_dirichlet: true  # Dirichlet分割损失
+  dice_on_logits: false
+  
+  # 权重配置 - 平衡的权重
+  branch_weight_cls: 1.0
+  branch_weight_seg: 1.0
+  loss_weight_cls: 1.0
+  loss_weight_kl: 0.2   # 更强的KL正则化
+  loss_weight_dice: 0.8
+  loss_weight_edl_mask: 1.2
+  
+  # 其他配置
+  eos_coef: 0.1
+  non_object: true
+  annealing_steps: 20000  # 更长的退火
+  use_direct_matching: false
+  
+  # 深监督
+  use_deep_supervision: true
+  ds_loss_weights: [1.0, 0.8, 0.6, 0.4]
+  ds_avg_type: 'sum'

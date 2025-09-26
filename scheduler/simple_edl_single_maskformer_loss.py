@@ -133,7 +133,7 @@ class SimpleEDLMaskformerLossV2(nn.Module):
                  loss_weight_dice=1.0,
                  loss_weight_edl_mask=1.0,
                  # Other params
-                 eos_coef=0.1,
+                 eos_coef=1,
                  annealing_steps=10000,
                  non_object=True,
                  ds_loss_weights=None,
@@ -201,6 +201,8 @@ class SimpleEDLMaskformerLossV2(nn.Module):
             return torch.tensor(0.0, device=src_logits_alpha.device), torch.tensor(0.0, device=src_logits_alpha.device)
 
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
+        # 确保target_classes_o在正确的设备上
+        target_classes_o = target_classes_o.to(src_logits_alpha.device)
         
         if self.use_direct_matching:
             # 直接匹配模式：每个样本都有固定数量的目标(N*C=12个专家-类别组合)
@@ -266,6 +268,8 @@ class SimpleEDLMaskformerLossV2(nn.Module):
 
         target_masks = torch.cat([t["masks"][i] for t, (_, i) in zip(targets, indices)], dim=0)
         target_masks = (target_masks > 0).float()
+        # 确保target_masks在正确的设备上
+        target_masks = target_masks.to(src_alpha_mask.device)
 
         if self.seg_edl_as_dirichlet:
             # Channel 0: background (beta), Channel 1: foreground (alpha)
@@ -323,8 +327,8 @@ class SimpleEDLMaskformerLossV2(nn.Module):
                     )
                 
                 # 直接匹配：前num_targets个查询对应num_targets个目标
-                src_idx = torch.arange(num_targets, device=device)
-                tgt_idx = torch.arange(num_targets, device=device)
+                src_idx = torch.arange(num_targets, device='cpu')
+                tgt_idx = torch.arange(num_targets, device='cpu')
                 indices.append((src_idx, tgt_idx))
                 
                 if should_log and i == 0:  # 只在第一个样本时记录
