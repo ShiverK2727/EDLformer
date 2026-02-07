@@ -74,9 +74,9 @@ loss:
   num_cls_classes: 12
   
   # 匹配器配置
-  matcher_cost_class: 2.0
-  matcher_cost_dice: 5.0
-  matcher_cost_evidence: 5.0
+  matcher_cost_class: 5.0
+  matcher_cost_dice: 1.0
+  matcher_cost_evidence: 1.0
   matcher_cost_class_type: 'evidence'  # 'evidence' 或 'prob'
   
   # 损失类型配置  
@@ -85,8 +85,8 @@ loss:
   dice_on_logits: true           # false: dice基于概率, true: dice基于logits
   
   # 分支权重配置
-  branch_weight_cls: 2.0         # 分类分支总权重
-  branch_weight_seg: 5.0         # 分割分支总权重
+  branch_weight_cls: 5.0         # 分类分支总权重
+  branch_weight_seg: 1.0         # 分割分支总权重
   
   # 分类分支子权重
   loss_weight_cls: 1.0           # 分类损失权重
