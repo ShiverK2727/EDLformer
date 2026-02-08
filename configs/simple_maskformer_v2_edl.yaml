@@ -1,0 +1,46 @@
+dataset:
+  type: 'RIGA'
+  config_path: './codes/configs/RIGA.yaml'
+
+experiment:
+  save_dir: './exp/simple_maskformer_v2_edl'
+  max_checkpoints: 3
+
+training:
+  seed: 42
+  epochs: 80
+  batch_size: 6
+  use_amp: true
+  num_workers: 4
+  learning_rate: 1.5e-3
+  min_learning_rate: 1e-5
+  optimizer_type: 'AdamW'
+  weight_decay: 1e-4
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  use_cosine_scheduler: true
+  warmup_epochs: 5
+
+model:
+  in_channels: 3
+  backbone_name: 'resnet34'
+  hidden_dim: 256
+  use_dino_align: false  # 若需开启对齐，请填入 dino_model_path 并改为 true
+  dino_model_path: null
+  bridge_layers_indices: [0]
+  backbone_decoder_channels: [128, 64, 32, 16, 8]
+  backbone_use_batchnorm: true
+  backbone_upsample_mode: 'interp'
+
+loss:
+  weight_ace: 1.0
+  weight_kl: 0.1
+  weight_dice: 1.0
+  kl_annealing_step: 10
+  weight_pixel_bce: 1.0
+  weight_pixel_dice: 1.0
+  use_pixel_aux: true
+  use_transformer_aux: true
+  pixel_aux_weights: [0.5, 0.5, 0.5]
+  transformer_aux_weights: [0.5, 0.5, 0.5]
+  weight_dino_align: 0.5
