@@ -11,7 +11,10 @@ from torch.utils.data import DataLoader
 
 from datasets import RIGADatasetSimpleV2
 from logger import setup_logger, log_info
-from metrics_edl import calculate_riga_metrics, calculate_soft_dice, evidence_weighted_consensus, dempster_shafer_fusion
+from metrics_edl import (
+    calculate_riga_metrics, calculate_soft_dice, evidence_weighted_consensus, 
+    dempster_shafer_fusion, calculate_ged, calculate_personalization_metrics
+)
 
 from utils_simple import (
     set_seed, load_config, apply_args_override, setup_training_args_parser,
@@ -107,6 +110,8 @@ def build_components(config):
         use_transformer_aux=loss_cfg.get('use_transformer_aux', False),
         pixel_aux_weights=loss_cfg.get('pixel_aux_weights'),
         transformer_aux_weights=loss_cfg.get('transformer_aux_weights'),
+        dice_use_evidence_softmax=loss_cfg.get('dice_use_evidence_softmax', False),
+        pixel_consensus_type=loss_cfg.get('pixel_consensus_type', 'mean'),
         use_dino_align=model_cfg.get('use_dino_align', False),
         weight_dino_align=loss_cfg.get('weight_dino_align', 1.0),
     ).cuda()
@@ -182,7 +187,32 @@ def validate(model, loader, dataset_metadata, config):
     all_labels = torch.cat(all_labels, dim=0)
     all_logits = torch.cat(all_logits, dim=0)
 
-    base_metrics = calculate_riga_metrics(all_labels, all_preds)
+    # 显式拆分指标计算，以解决 GED 因输入软概率导致的虚高问题
+    class_names = ["disc", "cup"]
+    base_metrics = {}
+
+    # 1. Soft Dice: 需要输入软概率 (内部会遍历多个阈值)
+    base_metrics['soft_dice'] = calculate_soft_dice(all_labels, all_preds, class_names=class_names)
+
+    # 2. 二值化: 用于 GED 和 个性化指标
+    # GED 是几何距离 (1-IoU)，如果使用软概率，IoU 会偏小，导致 GED 虚高。因此必须二值化。
+    preds_binary = (all_preds > 0.5).float()
+
+    # 3. GED: 输入二值化 mask
+    base_metrics['ged'] = calculate_ged(all_labels, preds_binary, class_names=class_names)
+
+    # 4. 个性化指标: 原则上也建议二值化 (尽管函数内部可能有处理，显式传入二值更安全)
+    # 注意：metrics_edl.py 中的 evaluate 辅助函数通常是 calculate_riga_metrics，这里我们拆解了它
+    personalization = calculate_personalization_metrics(all_labels, preds_binary, is_test=True, class_names=class_names)
+    base_metrics.update(personalization)
+
+    # 5. [新] 多样性检查 Mode Collapse
+    # 计算 N 个 Expert 预测在每个像素上的标准差均值。如果是 0 则说明发生了 Mode Collapse。
+    # all_preds: [B, N, C, H, W]
+    # std across dim=1 (experts)
+    pred_std = all_preds.std(dim=1).mean().item()
+    base_metrics['pred_diversity_std'] = pred_std
+    log_info(f"Validation Diversity (Std): {pred_std:.6f} (If approx 0, Model Collapse occurred)", print_message=True)
 
     # 基于证据的不确定性加权共识 Soft Dice
     alpha_all = torch.nn.functional.softplus(all_logits[:, :, :, 0]) + 1.0
@@ -232,19 +262,25 @@ def train_loop(config, args=None):
         logger.log_validation_metrics(val_metrics, avg_train_losses, current_lr, epoch)
         log_epoch_summary(epoch, total_epochs, avg_train_losses, val_metrics)
 
-        current_metric_score = val_metrics['soft_dice']['mean']
+        # 修改：使用 Dice Per Expert Mean 的整体均值作为最佳模型选择标准
+        dice_per_expert_mean = val_metrics.get('dice_per_expert_mean', {})
+        if dice_per_expert_mean:
+            current_metric_score = np.mean(list(dice_per_expert_mean.values()))
+        else:
+            current_metric_score = -np.inf  # 如果没有数据，使用负无穷
         is_best = current_metric_score > best_metric_score
         if is_best:
             best_metric_score = current_metric_score
             best_metrics = {'epoch': epoch, 'metrics': val_metrics}
-            log_info(f"*** New best model found! Epoch {epoch+1}, Soft Dice Mean: {best_metric_score:.6f} ***", print_message=True)
+            log_info(f"*** New best model found! Epoch {epoch+1}, Dice Per Expert Mean: {best_metric_score:.6f} ***", print_message=True)
 
             # 额外保存最佳指标摘要（便于快速查看）
             best_txt = os.path.join(save_dir, 'best_metrics.txt')
             soft_dice_edl = val_metrics.get('soft_dice_edl', {})
             dice_per_expert_mean = val_metrics.get('dice_per_expert_mean', {})
+            dice_per_expert_overall = np.mean(list(dice_per_expert_mean.values())) if dice_per_expert_mean else 0.0
             with open(best_txt, 'w', encoding='utf-8') as f:
-                f.write(f"Best Epoch: {epoch + 1}\n")
+                f.write(f"Best Epoch: {epoch + 1} (Selected by Dice Per Expert Mean Overall: {dice_per_expert_overall:.6f})\n")
                 f.write(f"Soft Dice Mean: {val_metrics['soft_dice'].get('mean', 0):.6f}\n")
                 f.write(f"  Disc: {val_metrics['soft_dice'].get('disc', 0):.6f}, Cup: {val_metrics['soft_dice'].get('cup', 0):.6f}\n")
                 if soft_dice_edl:
@@ -255,7 +291,17 @@ def train_loop(config, args=None):
                     f.write(f"DS Fused Soft Dice Mean: {soft_dice_ds.get('mean', 0):.6f}\n")
                     f.write(f"  Disc: {soft_dice_ds.get('disc', 0):.6f}, Cup: {soft_dice_ds.get('cup', 0):.6f}\n")
                 if 'ged' in val_metrics:
-                    f.write(f"GED: {val_metrics['ged']:.6f}\n")
+                    ged_val = val_metrics['ged']
+                    if isinstance(ged_val, dict):
+                        f.write(f"GED Overall: {ged_val.get('overall', 0):.6f}\n")
+                        for cls_name, v in ged_val.items():
+                            if cls_name == 'overall':
+                                continue
+                            f.write(f"  GED {cls_name}: {v:.6f}\n")
+                    else:
+                        f.write(f"GED: {ged_val:.6f}\n")
+                if 'pred_diversity_std' in val_metrics:
+                    f.write(f"Prediction Diversity (Std): {val_metrics['pred_diversity_std']:.6f}\n")
                 if 'dice_match' in val_metrics:
                     f.write(f"Dice Match Overall: {val_metrics['dice_match'].get('overall', 0):.6f}\n")
                 if dice_per_expert_mean:

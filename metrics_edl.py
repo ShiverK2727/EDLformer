@@ -122,7 +122,10 @@ def calculate_soft_dice(labels: torch.Tensor, preds: torch.Tensor, class_names: 
 
 
 def evidence_weighted_consensus(alpha: torch.Tensor, beta: torch.Tensor) -> torch.Tensor:
-    """基于 EDL 证据的不确定性加权，得到融合概率。
+    """基于贝叶斯证据累加的融合（Sum of Evidence）。
+
+    直接累加各专家的证据，相当于用 S=alpha+beta 作为权重进行加权平均，
+    可显著放大高证据专家的主导权，避免 1-u 权重的饱和效应。
 
     Args:
         alpha: [B, N, C, H, W]
@@ -130,11 +133,9 @@ def evidence_weighted_consensus(alpha: torch.Tensor, beta: torch.Tensor) -> torc
     Returns:
         fused_probs: [B, C, H, W]
     """
-    probs = alpha / (alpha + beta)
-    uncertainty = 2.0 / (alpha + beta)  # 二分类 K=2
-    weights = torch.clamp(1.0 - uncertainty, min=1e-6)
-    weights = weights / weights.sum(dim=1, keepdim=True)
-    fused_probs = (probs * weights).sum(dim=1)
+    sum_alpha = alpha.sum(dim=1)  # [B, C, H, W]
+    sum_beta = beta.sum(dim=1)
+    fused_probs = sum_alpha / (sum_alpha + sum_beta + 1e-6)
     return fused_probs
 
 
@@ -175,60 +176,52 @@ def dempster_shafer_fusion(alpha: torch.Tensor, beta: torch.Tensor) -> torch.Ten
     return fused_probs
 
 
-def calculate_ged(labels: torch.Tensor, preds: torch.Tensor, class_names: list = None) -> float:
+def calculate_ged(labels: torch.Tensor, preds: torch.Tensor, class_names: list = None) -> dict:
     """
-    [通用版本] 计算广义能量距离 (GED)，支持任意通道数的多类别分割。
-    
-    Args:
-        labels: 5D tensor (B, N, C, H, W) - 真实标签
-        preds: 5D tensor (B, N, C, H, W) - 预测结果
-        class_names: 类别名称列表，用于标识各通道含义 (可选)
-    
+    [通用版本] 计算广义能量距离 (GED)，返回按类别拆分的结果和 overall。
+
     Returns:
-        float: GED值
+        dict: {<class_name>: ged_value, ..., 'overall': mean_ged}
     """
     if labels.dim() != 5 or preds.dim() != 5 or labels.shape[2] != preds.shape[2]:
         raise ValueError("Input tensors must be 5D (B, N, C, H, W) with matching channel dimensions")
 
     num_classes = labels.shape[2]
-    if class_names is not None and len(class_names) != num_classes:
+    if class_names is None:
+        class_names = [f"class_{i}" for i in range(num_classes)]
+    if len(class_names) != num_classes:
         raise ValueError(f"class_names length ({len(class_names)}) must match number of classes ({num_classes})")
 
-    batch_ged = []
+    ged_per_class = {name: [] for name in class_names}
 
-    for i in range(labels.shape[0]): # 遍历Batch
+    for i in range(labels.shape[0]):
         pred_masks_i = preds[i]   # (N, C, H, W)
         label_masks_i = labels[i] # (N, C, H, W)
-        
-        def _get_avg_dist(masks1, masks2):
+
+        def _get_avg_dist_class(masks1, masks2, c_idx: int):
             total_dist = 0
             count = 0
             for m1_idx in range(masks1.shape[0]):
                 for m2_idx in range(masks2.shape[0]):
-                    if masks1 is masks2 and m1_idx == m2_idx: continue
-                    
-                    mask1 = masks1[m1_idx] # (C, H, W)
-                    mask2 = masks2[m2_idx] # (C, H, W)
-
-                    # 计算所有类别的IoU并取平均
-                    class_ious = []
-                    for c in range(num_classes):
-                        iou_c = _compute_iou_torch(mask1[c].view(-1), mask2[c].view(-1))
-                        class_ious.append(iou_c)
-                    
-                    avg_iou = torch.stack(class_ious).mean()
-                    total_dist += (1 - avg_iou)
+                    if masks1 is masks2 and m1_idx == m2_idx:
+                        continue
+                    mask1 = masks1[m1_idx, c_idx].view(-1)
+                    mask2 = masks2[m2_idx, c_idx].view(-1)
+                    iou_c = _compute_iou_torch(mask1, mask2)
+                    total_dist += (1 - iou_c)
                     count += 1
             return total_dist / count if count > 0 else torch.tensor(0.0, device=labels.device)
 
-        dist_pred_label = _get_avg_dist(pred_masks_i, label_masks_i)
-        dist_pred_pred = _get_avg_dist(pred_masks_i, pred_masks_i)
-        dist_label_label = _get_avg_dist(label_masks_i, label_masks_i)
-        
-        ged = 2 * dist_pred_label - dist_pred_pred - dist_label_label
-        batch_ged.append(ged.item())
+        for c_idx, cls_name in enumerate(class_names):
+            dist_pred_label = _get_avg_dist_class(pred_masks_i, label_masks_i, c_idx)
+            dist_pred_pred = _get_avg_dist_class(pred_masks_i, pred_masks_i, c_idx)
+            dist_label_label = _get_avg_dist_class(label_masks_i, label_masks_i, c_idx)
+            ged_c = 2 * dist_pred_label - dist_pred_pred - dist_label_label
+            ged_per_class[cls_name].append(ged_c.item())
 
-    return np.mean(batch_ged) if batch_ged else 0.0
+    ged_mean = {k: float(np.mean(v)) if v else 0.0 for k, v in ged_per_class.items()}
+    ged_mean['overall'] = float(np.mean(list(ged_mean.values()))) if ged_mean else 0.0
+    return ged_mean
 
 
 def calculate_personalization_metrics(labels: torch.Tensor, preds: torch.Tensor, is_test: bool = True, class_names: list = None) -> dict:
@@ -329,7 +322,7 @@ def calculate_riga_metrics(labels: torch.Tensor, preds: torch.Tensor, is_test: b
     # 计算软Dice分数
     results['soft_dice'] = calculate_soft_dice(labels, preds, class_names=class_names)
     
-    # 计算GED
+    # 计算GED（含类别拆分与overall）
     results['ged'] = calculate_ged(labels, preds, class_names=class_names)
     
     # 计算个性化指标

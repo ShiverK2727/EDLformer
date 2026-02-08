@@ -230,7 +230,16 @@ def log_epoch_summary(epoch: int, total_epochs: int, train_losses: Dict[str, flo
     
     # 记录GED指标
     if 'ged' in val_metrics:
-        log_info(f"  - GED: {val_metrics['ged']:.6f}", print_message=True)
+        ged_val = val_metrics['ged']
+        if isinstance(ged_val, dict):
+            overall = ged_val.get('overall', 0)
+            log_info(f"  - GED Overall: {overall:.6f}", print_message=True)
+            for cls_name, v in ged_val.items():
+                if cls_name == 'overall':
+                    continue
+                log_info(f"    - GED {cls_name}: {v:.6f}", print_message=True)
+        else:
+            log_info(f"  - GED: {ged_val:.6f}", print_message=True)
     
     log_info("-" * 40, print_message=True)
 
