@@ -4,7 +4,7 @@ dataset:
 
 experiment:
   # 实验保存根目录，训练过程中会在此目录下创建 checkpoint、log 等
-  save_dir: './exp/simple_maskformer_v2_edl_test'
+  save_dir: './exp/simple_maskformer_v2_edl_test3'
   # 最多保留的检查点数量
   max_checkpoints: 3
 
@@ -13,12 +13,12 @@ training:
   epochs: 100
   batch_size: 8
   # 是否使用混合精度训练
-  use_amp: true
+  use_amp: false
   num_workers: 4
   
   # 优化器配置
   optimizer_type: 'AdamW'  # 可选: 'AdamW', 'Adam', 'SGD'
-  learning_rate: 1e-3
+  learning_rate: 5e-4
   min_learning_rate: 1e-6
   weight_decay: 1e-4
   betas: [0.9, 0.999]
@@ -32,22 +32,27 @@ training:
 model:
   in_channels: 3
   backbone_name: 'resnet34'
-  hidden_dim: 256
+  hidden_dim: 64
   
   # DINO 对齐配置 (用于特征蒸馏/对齐)
-  use_dino_align: false
-  dino_model_path: null  # 例如: 'facebook/dinov2-base'
-  bridge_layers_indices: [0]
+  use_dino_align: true
+  dino_model_path: "/app/huggingface/models--facebook--dinov3-convnext-large-pretrain-lvd1689m/snapshots/e959efa74c867491dcfe3ec3e4f97382e39025b3"  # 例如: 'facebook/dinov2-base'
+  bridge_layers_indices: [0,1,2]
   
   # 像素解码器 (UNet) 配置
-  backbone_decoder_channels: [128, 64, 32, 16, 8]
+  backbone_decoder_channels: [256, 128, 64, 32, 16]
   backbone_use_batchnorm: true
-  backbone_upsample_mode: 'interp'  # 可选: 'interp', 'transposed'
+  backbone_upsample_mode: 'transposed'  # 可选: 'interp', 'transposed'
+  
+  # Transformer 配置
+  nheads: 4
+  dim_feedforward: 768
+  transformer_scale_indices: [1, 2, 3] # 对应 strides: 8, 4, 2 (基于 backbone_decoder_channels 的索引)
 
 loss:
   # Beta-EDL 损失权重
   weight_ace: 1.0
-  weight_kl: 0.1
+  weight_kl: 0.2
   weight_dice: 1.0
   kl_annealing_step: 10
   
@@ -56,13 +61,13 @@ loss:
   weight_pixel_dice: 1.0
   
   # 深监督开关
-  use_pixel_aux: true
-  use_transformer_aux: true
+  use_pixel_aux: false
+  use_transformer_aux: false
   
   # 各级深监督权重 (与 transformer_scale_indices 对齐)
-  pixel_aux_weights: [0.5, 0.5, 0.5]
-  transformer_aux_weights: [0.5, 0.5, 0.5]
+  pixel_aux_weights: [0.5, 0.2, 0.1]
+  transformer_aux_weights: [0.5, 0.2, 0.1]
   
   # DINO 对齐损失权重
-  weight_dino_align: 0.5
+  weight_dino_align: 1.0
 

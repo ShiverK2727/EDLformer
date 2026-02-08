@@ -171,7 +171,8 @@ def build_optimizer_and_scheduler(model, config):
         return optimizer, None
     
     # 构建余弦退火调度器
-    total_epochs = config.get('epochs', 100)
+    # 优先从 training 节点获取 epochs，否则从顶级节点获取
+    total_epochs = training_cfg.get('epochs', config.get('epochs', 100))
     warmup_epochs = int(training_cfg.get('warmup_epochs', 0))
     min_lr = float(training_cfg.get('min_learning_rate', 1e-6))
     

@@ -6,33 +6,24 @@ from typing import List, Optional, Dict
 
 # 基础 EDL 组件
 
-def edl_digamma_ace_loss(alpha: torch.Tensor, y_one_hot: torch.Tensor) -> torch.Tensor:
-    """
-    Alpha shape: [B, N, C, H, W]
-    y_one_hot shape: [B, N, C, H, W]
-    """
-    S = torch.sum(alpha, dim=2, keepdim=True)  # [B, N, 1, H, W]
-    loss = torch.sum(y_one_hot * (torch.digamma(S) - torch.digamma(alpha)), dim=2)  # [B, N, H, W]
+def beta_ace_loss(alpha: torch.Tensor, beta: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Binary ACE for Beta-EDL (per-channel independent)."""
+    S = alpha + beta
+    loss = target * (torch.digamma(S) - torch.digamma(alpha)) + (1 - target) * (torch.digamma(S) - torch.digamma(beta))
     return loss.mean()
 
 
-def edl_kl_regularizer(alpha: torch.Tensor, y_one_hot: torch.Tensor, epoch: int, annealing_step: int = 10) -> torch.Tensor:
-    """
-    KL 正则，按像素展开。
-    """
-    num_classes = alpha.shape[2]
-    alpha_flat = alpha.permute(0, 1, 3, 4, 2).contiguous().view(-1, num_classes)
-    y_flat = y_one_hot.permute(0, 1, 3, 4, 2).contiguous().view(-1, num_classes)
-    evidence = alpha_flat - 1
-    alp = evidence * (1 - y_flat) + 1
-    beta = torch.ones((1, num_classes), device=alpha.device)
-    S_alpha = torch.sum(alp, dim=1, keepdim=True)
-    S_beta = torch.sum(beta, dim=1, keepdim=True)
-    lnB_alpha = torch.lgamma(S_alpha) - torch.sum(torch.lgamma(alp), dim=1, keepdim=True)
-    lnB_beta = torch.sum(torch.lgamma(beta), dim=1, keepdim=True) - torch.lgamma(S_beta)
-    dg_alpha_sum = torch.digamma(S_alpha)
-    dg_alpha = torch.digamma(alp)
-    kl = torch.sum((alp - beta) * (dg_alpha - dg_alpha_sum), dim=1, keepdim=True) + lnB_alpha + lnB_beta
+def beta_kl_regularizer(alpha: torch.Tensor, beta: torch.Tensor, epoch: int, annealing_step: int = 10) -> torch.Tensor:
+    """KL to Beta(1,1) prior, per-channel."""
+    alpha_flat = alpha.flatten(0, -4)  # [B*N*C*H*W]
+    beta_flat = beta.flatten(0, -4)
+    S = alpha_flat + beta_flat
+    kl = (
+        (alpha_flat - 1) * (torch.digamma(alpha_flat) - torch.digamma(S)) +
+        (beta_flat - 1) * (torch.digamma(beta_flat) - torch.digamma(S)) -
+        (torch.lgamma(alpha_flat) + torch.lgamma(beta_flat) - torch.lgamma(S)) +
+        torch.lgamma(torch.tensor(2.0, device=alpha.device))
+    )
     anneal = min(1.0, float(epoch) / float(max(1, annealing_step)))
     return (anneal * kl).mean()
 
@@ -131,12 +122,13 @@ class MaskSegEDLLoss(nn.Module):
         targets = self._ensure_one_hot(targets)
 
         # === 主 Evidence 分支 ===
-        evidence = outputs['pred_evidence']  # [B, N, C, H, W]
-        alpha = evidence + 1.0
-        prob = alpha / torch.sum(alpha, dim=2, keepdim=True)
+        logits = outputs['pred_logits']           # [B, N, C, 2, H, W]
+        alpha = F.softplus(logits[:, :, :, 0]) + 1.0  # [B, N, C, H, W]
+        beta  = F.softplus(logits[:, :, :, 1]) + 1.0
+        prob = alpha / (alpha + beta)
 
-        loss_ace = edl_digamma_ace_loss(alpha, targets)
-        loss_kl = edl_kl_regularizer(alpha, targets, epoch, self.kl_annealing_step)
+        loss_ace = beta_ace_loss(alpha, beta, targets)
+        loss_kl = beta_kl_regularizer(alpha, beta, epoch, self.kl_annealing_step)
         loss_dice = soft_dice_loss(prob, targets)
 
         total_loss = (
@@ -153,15 +145,14 @@ class MaskSegEDLLoss(nn.Module):
         if self.use_transformer_aux:
             aux_outputs = outputs.get('aux_outputs', []) or []
             for idx, aux in enumerate(aux_outputs):
-                logits_aux = aux['pred_masks']  # [B, N*C, H, W]
+                logits_aux = aux['pred_masks']  # [B, N, C, 2, H, W]
                 if logits_aux.shape[-2:] != targets.shape[-2:]:
                     logits_aux = F.interpolate(logits_aux, size=targets.shape[-2:], mode='bilinear', align_corners=False)
-                bsz = logits_aux.shape[0]
-                aux_reshaped = logits_aux.view(bsz, self.num_experts, self.num_classes, *logits_aux.shape[-2:])
-                alpha_aux = F.softplus(aux_reshaped) + 1.0
-                prob_aux = alpha_aux / torch.sum(alpha_aux, dim=2, keepdim=True)
+                alpha_aux = F.softplus(logits_aux[:, :, :, 0]) + 1.0
+                beta_aux  = F.softplus(logits_aux[:, :, :, 1]) + 1.0
+                prob_aux = alpha_aux / (alpha_aux + beta_aux)
 
-                ace_aux = edl_digamma_ace_loss(alpha_aux, targets)
+                ace_aux = beta_ace_loss(alpha_aux, beta_aux, targets)
                 dice_aux = soft_dice_loss(prob_aux, targets)
                 weight = self.transformer_aux_weights[idx] if idx < len(self.transformer_aux_weights) else 1.0
                 total_loss = total_loss + weight * (ace_aux + dice_aux)

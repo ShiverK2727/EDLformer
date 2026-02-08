@@ -11,9 +11,9 @@ from torch.utils.data import DataLoader
 
 from datasets import RIGADatasetSimpleV2
 from logger import setup_logger, log_info
-from metrics import calculate_riga_metrics
+from metrics_edl import calculate_riga_metrics, calculate_soft_dice, evidence_weighted_consensus, dempster_shafer_fusion
 
-from utils_v2 import (
+from utils_simple import (
     set_seed, load_config, apply_args_override, setup_training_args_parser,
     save_override_record, TensorboardLogger, log_epoch_summary,
     save_checkpoint, save_final_results, build_optimizer_and_scheduler
@@ -65,6 +65,15 @@ def build_components(config):
 
     # 模型
     model_cfg = config['model']
+    if model_cfg.get('use_dino_align', False):
+        if not model_cfg.get('dino_model_path'):
+            log_info("警告: use_dino_align=True 但未提供 dino_model_path，已自动关闭对齐。", print_message=True)
+            model_cfg['use_dino_align'] = False
+        else:
+            log_info(f"DINO 对齐已启用，加载路径: {model_cfg.get('dino_model_path')}", print_message=True)
+    else:
+        if model_cfg.get('dino_model_path'):
+            log_info("提示: 已提供 dino_model_path 但 use_dino_align=False，如需使用请在配置中开启 use_dino_align。", print_message=True)
     model = SimpleMaskFormerV2(
         in_channels=model_cfg.get('in_channels', 3),
         num_classes=num_classes,
@@ -77,6 +86,9 @@ def build_components(config):
         backbone_decoder_channels=model_cfg.get('backbone_decoder_channels', [128, 64, 32, 16, 8]),
         backbone_use_batchnorm=model_cfg.get('backbone_use_batchnorm', True),
         backbone_upsample_mode=model_cfg.get('backbone_upsample_mode', 'interp'),
+        transformer_scale_indices=model_cfg.get('transformer_scale_indices', [1, 2, 3]),
+        nheads=model_cfg.get('nheads', 4),
+        dim_feedforward=model_cfg.get('dim_feedforward', 256),
     ).cuda()
     log_info("模型构建完成。", print_message=True)
 
@@ -149,7 +161,7 @@ def train_one_epoch(model, loader, optimizer, loss_fn, scaler, epoch, total_epoc
 
 def validate(model, loader, dataset_metadata, config):
     model.eval()
-    all_preds, all_labels = [], []
+    all_preds, all_labels, all_logits = [], [], []
 
     with torch.no_grad():
         for batch in tqdm(loader, desc='Validating', leave=False, ncols=120, file=sys.stdout):
@@ -157,17 +169,44 @@ def validate(model, loader, dataset_metadata, config):
             labels = batch['expert_masks'].cuda(non_blocking=True)
 
             outputs = model(images)
-            evidence = outputs['pred_evidence']  # [B, N, C, H, W]
-            alpha = evidence + 1.0
-            prob = alpha / torch.sum(alpha, dim=2, keepdim=True)
+            logits = outputs['pred_logits']      # [B, N, C, 2, H, W]
+            alpha = torch.nn.functional.softplus(logits[:, :, :, 0]) + 1.0
+            beta = torch.nn.functional.softplus(logits[:, :, :, 1]) + 1.0
+            prob = alpha / (alpha + beta)
 
             all_preds.append(prob.cpu())
             all_labels.append(labels.cpu())
+            all_logits.append(logits.cpu())
 
     all_preds = torch.cat(all_preds, dim=0)
     all_labels = torch.cat(all_labels, dim=0)
+    all_logits = torch.cat(all_logits, dim=0)
 
-    return calculate_riga_metrics(all_labels, all_preds)
+    base_metrics = calculate_riga_metrics(all_labels, all_preds)
+
+    # 基于证据的不确定性加权共识 Soft Dice
+    alpha_all = torch.nn.functional.softplus(all_logits[:, :, :, 0]) + 1.0
+    beta_all = torch.nn.functional.softplus(all_logits[:, :, :, 1]) + 1.0
+    fused_probs = evidence_weighted_consensus(alpha_all, beta_all)  # [B, C, H, W]
+    fused_probs_exp = fused_probs.unsqueeze(1)  # 伪装单专家，便于复用 soft dice 计算
+    consensus_labels = all_labels.mean(dim=1, keepdim=True)        # [B, 1, C, H, W]
+    soft_dice_edl = calculate_soft_dice(consensus_labels, fused_probs_exp, class_names=["disc", "cup"])
+
+    # Dempster-Shafer 融合 Soft Dice
+    ds_probs = dempster_shafer_fusion(alpha_all, beta_all)         # [B, C, H, W]
+    ds_probs_exp = ds_probs.unsqueeze(1)
+    soft_dice_ds = calculate_soft_dice(consensus_labels, ds_probs_exp, class_names=["disc", "cup"])
+
+    # 追加 dice_per_expert 的均值，便于记录
+    dice_per_expert_mean = {
+        k: float(np.mean(v)) if isinstance(v, list) else float(v)
+        for k, v in base_metrics.get('dice_per_expert', {}).items()
+    }
+
+    base_metrics['soft_dice_edl'] = soft_dice_edl
+    base_metrics['dice_per_expert_mean'] = dice_per_expert_mean
+    base_metrics['soft_dice_ds'] = soft_dice_ds
+    return base_metrics
 
 
 def train_loop(config, args=None):
@@ -199,6 +238,30 @@ def train_loop(config, args=None):
             best_metric_score = current_metric_score
             best_metrics = {'epoch': epoch, 'metrics': val_metrics}
             log_info(f"*** New best model found! Epoch {epoch+1}, Soft Dice Mean: {best_metric_score:.6f} ***", print_message=True)
+
+            # 额外保存最佳指标摘要（便于快速查看）
+            best_txt = os.path.join(save_dir, 'best_metrics.txt')
+            soft_dice_edl = val_metrics.get('soft_dice_edl', {})
+            dice_per_expert_mean = val_metrics.get('dice_per_expert_mean', {})
+            with open(best_txt, 'w', encoding='utf-8') as f:
+                f.write(f"Best Epoch: {epoch + 1}\n")
+                f.write(f"Soft Dice Mean: {val_metrics['soft_dice'].get('mean', 0):.6f}\n")
+                f.write(f"  Disc: {val_metrics['soft_dice'].get('disc', 0):.6f}, Cup: {val_metrics['soft_dice'].get('cup', 0):.6f}\n")
+                if soft_dice_edl:
+                    f.write(f"EDL Weighted Soft Dice Mean: {soft_dice_edl.get('mean', 0):.6f}\n")
+                    f.write(f"  Disc: {soft_dice_edl.get('disc', 0):.6f}, Cup: {soft_dice_edl.get('cup', 0):.6f}\n")
+                soft_dice_ds = val_metrics.get('soft_dice_ds', {})
+                if soft_dice_ds:
+                    f.write(f"DS Fused Soft Dice Mean: {soft_dice_ds.get('mean', 0):.6f}\n")
+                    f.write(f"  Disc: {soft_dice_ds.get('disc', 0):.6f}, Cup: {soft_dice_ds.get('cup', 0):.6f}\n")
+                if 'ged' in val_metrics:
+                    f.write(f"GED: {val_metrics['ged']:.6f}\n")
+                if 'dice_match' in val_metrics:
+                    f.write(f"Dice Match Overall: {val_metrics['dice_match'].get('overall', 0):.6f}\n")
+                if dice_per_expert_mean:
+                    f.write("Dice Per Expert Mean:\n")
+                    for cls_name, v in dice_per_expert_mean.items():
+                        f.write(f"  {cls_name}: {v:.6f}\n")
 
         last_metrics = {'epoch': epoch, 'metrics': val_metrics}
 
@@ -237,7 +300,7 @@ if __name__ == '__main__':
     # 保存配置
     with open(os.path.join(save_dir, 'final_config.yaml'), 'w', encoding='utf-8') as f:
         yaml.dump(config, f, allow_unicode=True, sort_keys=False, indent=2)
-    save_override_record(config, override_params, args, save_dir)
+    save_override_record(override_params, args, save_dir)
 
     log_info("开始 SimpleMaskFormerV2 EDL 分割训练...", print_message=True)
     log_info(f"实验目录: {save_dir}", print_message=True)

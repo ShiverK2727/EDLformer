@@ -33,10 +33,15 @@ class SimpleMaskFormerV2(nn.Module):
         backbone_decoder_channels: List[int] = [128, 64, 32, 16, 8],
         backbone_use_batchnorm: bool = True,
         backbone_upsample_mode: str = 'interp',
+        # Transformer configurations
+        transformer_scale_indices: List[int] = [1, 2, 3],
+        nheads: int = 4,
+        dim_feedforward: int = 256,
     ):
         super().__init__()
         self.num_classes = num_classes
         self.num_experts = num_experts
+
         self.use_dino_align = use_dino_align and dino_model_path is not None
         self.bridge_layers_indices = bridge_layers_indices
         
@@ -77,7 +82,12 @@ class SimpleMaskFormerV2(nn.Module):
         )
         
         # Projection for mask features (last layer of decoder) - use hidden_dim to align with transformer
-        self.linear_mask_features = nn.Conv2d(
+        # Projection heads for mask features (independent alpha/beta features)
+        self.linear_mask_features_alpha = nn.Conv2d(
+            backbone_decoder_channels[-1], hidden_dim,
+            kernel_size=1, stride=1, padding=0
+        )
+        self.linear_mask_features_beta = nn.Conv2d(
             backbone_decoder_channels[-1], hidden_dim,
             kernel_size=1, stride=1, padding=0
         )
@@ -98,7 +108,7 @@ class SimpleMaskFormerV2(nn.Module):
         # Index 4: Stride 1 (ch=8)
         
         # User requested 8, 4, 2 strides (Indices 1, 2, 3)
-        self.transformer_scale_indices = [1, 2, 3]
+        self.transformer_scale_indices = transformer_scale_indices
         trans_in_channels = [backbone_decoder_channels[i] for i in self.transformer_scale_indices]
         # Pixel-decoder deep supervision heads aligned with transformer scales
         self.pixel_aux_heads = nn.ModuleList([
@@ -112,6 +122,8 @@ class SimpleMaskFormerV2(nn.Module):
             hidden_dim=hidden_dim,
             num_experts=num_experts,
             num_classes=num_classes,
+            nheads=nheads,
+            dim_feedforward=dim_feedforward,
             use_bridge=self.use_dino_align,
             bridge_layers_indices=self.bridge_layers_indices,
         )
@@ -152,7 +164,8 @@ class SimpleMaskFormerV2(nn.Module):
         
         # Standard MaskFormer takes the last feature (Highest resolution)
         # de_feats is a list of decoder features. Last one is usually highest res.
-        mask_features = self.linear_mask_features(de_feats[-1]) # [B, hidden_dim, H, W]
+        mask_features_alpha = self.linear_mask_features_alpha(de_feats[-1]) # [B, hidden_dim, H, W]
+        mask_features_beta = self.linear_mask_features_beta(de_feats[-1])   # [B, hidden_dim, H, W]
         
         # Select Multi-scale features for Transformer (Stride 8, 4, 2)
         ms_pixel_feats = [de_feats[i] for i in self.transformer_scale_indices]
@@ -164,26 +177,33 @@ class SimpleMaskFormerV2(nn.Module):
             pixel_aux_masks.append(aux_logits)
         
         # D. Transformer (Cascaded Interaction) - mask-only outputs
-        transformer_out = self.transformer_decoder(ms_pixel_feats, bridge_feat, mask_features)
+        transformer_out = self.transformer_decoder(ms_pixel_feats, bridge_feat, mask_features_alpha, mask_features_beta)
         
         # E. Auxiliary Pixel Segmentation
         pix_pred_mask = self.segmentation_head(de_feats[-1])
         
-        # F. Format Output for DSEBridgeLoss (Evidence + Bridge + DINO)
+        # F. Format Output (mask logits for per-class independent Beta-EDL)
+        # transformer_out['pred_masks']: [B, N*C, 2, H, W]
         final_mask_logits = transformer_out['pred_masks']
-             
-        # Evidence Generation
-        # [B, N*K, H, W] -> [B, N, K, H, W]
-        # Query Order: Expert 1 (Class 1...K), Expert 2 (Class 1...K)
-        B_sz = final_mask_logits.shape[0]
-        evidence = F.softplus(final_mask_logits)
-        evidence = evidence.view(B_sz, self.num_experts, self.num_classes, final_mask_logits.shape[-2], final_mask_logits.shape[-1])
+        logits_reshaped = final_mask_logits.view(
+            final_mask_logits.shape[0],
+            self.num_experts, self.num_classes, 2,
+            final_mask_logits.shape[-2], final_mask_logits.shape[-1]
+        )
+
+        aux_outputs = []
+        for aux in transformer_out['aux_outputs']:
+            aux_logits = aux['pred_masks'].view(
+                aux['pred_masks'].shape[0], self.num_experts, self.num_classes, 2,
+                aux['pred_masks'].shape[-2], aux['pred_masks'].shape[-1]
+            )
+            aux_outputs.append({'pred_masks': aux_logits})
         
         return {
-            "pred_evidence": evidence, # For DSEBridgeLoss task_loss
-            "aux_outputs": transformer_out['aux_outputs'], # Deep supervision (mask only)
-            "pixel_final_mask": pix_pred_mask, # Final pixel-decoder head
-            "pix_pred_masks": pixel_aux_masks, # Pixel-decoder deep supervision aligned with transformer scales
-            "bridge_feat": bridge_feat, # For DSEBridgeLoss align
-            "dino_feat": dino_feat, # For DSEBridgeLoss align
+            "pred_logits": logits_reshaped,              # [B, N, C, 2, H, W]
+            "aux_outputs": aux_outputs,
+            "pixel_final_mask": pix_pred_mask,
+            "pix_pred_masks": pixel_aux_masks,
+            "bridge_feat": bridge_feat,
+            "dino_feat": dino_feat,
         }

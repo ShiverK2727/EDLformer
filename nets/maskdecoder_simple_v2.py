@@ -91,14 +91,17 @@ class DualSourceTransformerDecoder(nn.Module):
         
         # --- Heads ---
         # Mask Predictor (Evidence Head) 输出维度与 hidden_dim 同步
-        self.mask_embed = MLP(hidden_dim, hidden_dim, hidden_dim, 3)
+        # Separate embeddings for alpha/beta query projections
+        self.mask_embed_alpha = MLP(hidden_dim, hidden_dim, hidden_dim, 3)
+        self.mask_embed_beta = MLP(hidden_dim, hidden_dim, hidden_dim, 3)
         self.nheads = nheads  # Store nheads
 
-    def forward(self, pixel_features, bridge_feature, mask_features):
+    def forward(self, pixel_features, bridge_feature, mask_features_alpha, mask_features_beta):
         """
         pixel_features: List of tensors [B, Ci, Hi, Wi] (Multi-scale)
         bridge_feature: [B, C_bri, H_bri, W_bri] (Low Res, Aligned)
-        mask_features: [B, D, H, W] (High Res for final mask generation)
+        mask_features_alpha: [B, D, H, W] (High Res for alpha)
+        mask_features_beta:  [B, D, H, W] (High Res for beta)
         """
         B = pixel_features[0].shape[0]
         
@@ -144,12 +147,14 @@ class DualSourceTransformerDecoder(nn.Module):
             # --- Generate Predictions for this layer (Deep Supervision) ---
             tgt_transposed = tgt.transpose(0, 1)
 
-            # Mask Embedding: [B, N*K, mask_dim]
-            curr_mask_embed = self.mask_embed(tgt_transposed)
+            # Dual embeddings for alpha/beta queries
+            q_alpha = self.mask_embed_alpha(tgt_transposed)  # [B, N*K, D]
+            q_beta = self.mask_embed_beta(tgt_transposed)    # [B, N*K, D]
             
-            # Mask Logits: Generated at HIGH RESOLUTION using mask_features
-            # [B, N*K, mask_dim] @ [B, mask_dim, H_high, W_high] -> [B, N*K, H_high, W_high]
-            mask_logits = torch.einsum("bqc,bchw->bqhw", curr_mask_embed, mask_features)
+            alpha_logits = torch.einsum("bqc,bchw->bqhw", q_alpha, mask_features_alpha)
+            beta_logits  = torch.einsum("bqc,bchw->bqhw", q_beta,  mask_features_beta)
+            # Stack as [B, N*K, 2, H, W]
+            mask_logits = torch.stack([alpha_logits, beta_logits], dim=2)
             predictions_mask.append(mask_logits)
             
         # Return all intermediate outputs
